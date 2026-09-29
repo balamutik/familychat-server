@@ -45,6 +45,29 @@ func TestFileAuthorizationAndRange(t *testing.T) {
 	}
 	_ = json.Unmarshal(w.Body.Bytes(), &file)
 	path := "/api/v1/files/" + file.ID + "/content"
+	svgUpload := httptest.NewRequest("POST", "/api/v1/chats/"+chat.ID+"/files", strings.NewReader(`<svg xmlns="http://www.w3.org/2000/svg"></svg>`))
+	svgUpload.Header.Set("Authorization", "Bearer "+st)
+	svgUpload.Header.Set("Content-Type", "image/svg+xml")
+	svgUpload.Header.Set("X-File-Name", "picture.svg")
+	svgResponse := httptest.NewRecorder()
+	h.ServeHTTP(svgResponse, svgUpload)
+	if svgResponse.Code != 201 {
+		t.Fatalf("svg upload: %d", svgResponse.Code)
+	}
+	var svgFile struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(svgResponse.Body.Bytes(), &svgFile)
+	defer func() {
+		var key string
+		if pool.QueryRow(t.Context(), `SELECT object_key FROM attachments WHERE id=$1`, svgFile.ID).Scan(&key) == nil {
+			_ = store.Delete(t.Context(), key)
+		}
+	}()
+	svgContent := callAPI(h, "GET", "/api/v1/files/"+svgFile.ID+"/content", "", st)
+	if svgContent.Code != 200 || !strings.HasPrefix(svgContent.Header().Get("Content-Disposition"), "attachment") {
+		t.Fatalf("SVG served inline: %d %s", svgContent.Code, svgContent.Header().Get("Content-Disposition"))
+	}
 	defer func() {
 		var key string
 		if pool.QueryRow(t.Context(), `SELECT object_key FROM attachments WHERE id=$1`, file.ID).Scan(&key) == nil {
@@ -58,6 +81,12 @@ func TestFileAuthorizationAndRange(t *testing.T) {
 	if r := callAPI(h, "POST", "/api/v1/chats/"+chat.ID+"/messages", message, st); r.Code != 201 {
 		t.Fatalf("send attachment: %d %s", r.Code, r.Body.String())
 	}
+	if r := callAPI(h, "GET", "/api/v1/chats/"+chat.ID+"/messages", "", rt); r.Code != 200 || !strings.Contains(r.Body.String(), file.ID) {
+		t.Fatalf("recipient history missing attachment: %d %s", r.Code, r.Body.String())
+	}
+	if r := callAPI(h, "POST", "/api/v1/chats/"+chat.ID+"/messages", `{"client_message_id":"00000000-0000-4000-8000-000000000002","text":"Файл"}`, st); r.Code != 409 {
+		t.Fatalf("attachment idempotency mismatch: %d", r.Code)
+	}
 	for _, tc := range []struct {
 		name, method, token string
 		status              int
@@ -68,6 +97,9 @@ func TestFileAuthorizationAndRange(t *testing.T) {
 		rr := callAPI(h, tc.method, path, "", tc.token)
 		if rr.Code != tc.status {
 			t.Fatalf("%s status=%d body=%s", tc.name, rr.Code, rr.Body.String())
+		}
+		if rr.Header().Get("Location") != "" {
+			t.Fatalf("%s redirected to storage", tc.name)
 		}
 		if tc.method == "HEAD" && rr.Body.Len() != 0 {
 			t.Fatal("HEAD returned a body")
@@ -87,6 +119,20 @@ func TestFileAuthorizationAndRange(t *testing.T) {
 	h.ServeHTTP(w, queryToken)
 	if w.Code != 401 {
 		t.Fatalf("query/cookie token accepted: %d", w.Code)
+	}
+	if r := callAPI(h, "POST", "/api/v1/auth/logout", "", rt); r.Code != 204 {
+		t.Fatalf("logout: %d", r.Code)
+	}
+	for _, method := range []string{"GET", "HEAD"} {
+		req := httptest.NewRequest(method, path, nil)
+		req.Header.Set("Authorization", "Bearer "+rt)
+		req.Header.Set("Range", "bytes=0-1")
+		req.Header.Set("If-None-Match", `"anything"`)
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != 401 {
+			t.Fatalf("revoked %s: %d", method, w.Code)
+		}
 	}
 	_ = sender
 }
@@ -138,6 +184,26 @@ func TestGroupFileAccessStopsAfterRemoval(t *testing.T) {
 	if r := callAPI(h, "POST", chatPath+"/messages", body, ownerToken); r.Code != 201 {
 		t.Fatalf("message: %d %s", r.Code, r.Body.String())
 	}
+	previewKey := "tests/preview-" + file.ID
+	if err := store.Put(t.Context(), previewKey, strings.NewReader("thumbnail"), 9, "image/jpeg"); err != nil {
+		t.Fatal(err)
+	}
+	defer store.Delete(t.Context(), previewKey)
+	if _, err := pool.Exec(t.Context(), `UPDATE attachments SET preview_key=$2,preview_state='ready' WHERE id=$1`, file.ID, previewKey); err != nil {
+		t.Fatal(err)
+	}
+	previewPath := "/api/v1/files/" + file.ID + "/preview"
+	for _, testPath := range []string{path, previewPath} {
+		if r := callAPI(h, "GET", testPath, "", strangerToken); r.Code != 404 {
+			t.Fatalf("outsider %s: %d", testPath, r.Code)
+		}
+		if r := callAPI(h, "GET", testPath, "", ""); r.Code != 401 {
+			t.Fatalf("unauthorized %s: %d", testPath, r.Code)
+		}
+		if r := callAPI(h, "HEAD", testPath, "", memberToken); r.Code != 200 || r.Header().Get("Location") != "" {
+			t.Fatalf("member preview HEAD %s: %d", testPath, r.Code)
+		}
+	}
 	if r := callAPI(h, "GET", path, "", memberToken); r.Code != 200 {
 		t.Fatalf("member file: %d", r.Code)
 	}
@@ -148,13 +214,15 @@ func TestGroupFileAccessStopsAfterRemoval(t *testing.T) {
 		t.Fatalf("remove member: %d", r.Code)
 	}
 	for _, method := range []string{"GET", "HEAD"} {
-		req := httptest.NewRequest(method, path, nil)
-		req.Header.Set("Authorization", "Bearer "+memberToken)
-		req.Header.Set("Range", "bytes=0-2")
-		w := httptest.NewRecorder()
-		h.ServeHTTP(w, req)
-		if w.Code != 404 || w.Header().Get("Content-Range") != "" {
-			t.Fatalf("removed member %s: %d %q", method, w.Code, w.Header().Get("Content-Range"))
+		for _, testPath := range []string{path, previewPath} {
+			req := httptest.NewRequest(method, testPath, nil)
+			req.Header.Set("Authorization", "Bearer "+memberToken)
+			req.Header.Set("Range", "bytes=0-2")
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, req)
+			if w.Code != 404 || w.Header().Get("Content-Range") != "" {
+				t.Fatalf("removed member %s %s: %d %q", method, testPath, w.Code, w.Header().Get("Content-Range"))
+			}
 		}
 	}
 }

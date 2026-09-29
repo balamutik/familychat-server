@@ -3,6 +3,7 @@ package objects
 import (
 	"context"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
@@ -41,6 +42,14 @@ func TestRoundTripAndRange(t *testing.T) {
 	defer s.Delete(context.Background(), key)
 	if err := s.Put(ctx, key, strings.NewReader("hello world"), 11, "text/plain"); err != nil {
 		t.Fatal(err)
+	}
+	response, err := http.Get(strings.TrimSuffix(endpoint, "/") + "/familychat-test/" + key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusForbidden {
+		t.Fatalf("anonymous S3 object access: %d", response.StatusCode)
 	}
 	meta, err := s.Head(ctx, key)
 	if err != nil || meta.Size != 11 {

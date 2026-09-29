@@ -164,6 +164,9 @@ func registerAdmin(mux *http.ServeMux, d Dependencies) {
 			writeError(w, 500, "internal")
 			return
 		}
+		if *body.Disabled && d.Events != nil {
+			d.Events.CloseUser(id)
+		}
 		writeJSON(w, 200, map[string]any{"id": id, "disabled": *body.Disabled})
 	}))
 }

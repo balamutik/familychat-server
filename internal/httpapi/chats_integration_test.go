@@ -49,6 +49,19 @@ func TestConcurrentDirectChatCreation(t *testing.T) {
 	if err := pool.QueryRow(t.Context(), `SELECT count(*) FROM chats WHERE kind='direct' AND ((direct_user_low=$1 AND direct_user_high=$2) OR (direct_user_low=$2 AND direct_user_high=$1))`, a, b).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("chat count=%d err=%v", count, err)
 	}
+	var peerLogin string
+	if err := pool.QueryRow(t.Context(), `SELECT login FROM users WHERE id=$1`, b).Scan(&peerLogin); err != nil {
+		t.Fatal(err)
+	}
+	if r := callAPI(h, "GET", "/api/v1/users?q="+peerLogin, "", token); r.Code != 200 || !containsText(r.Body.String(), b) {
+		t.Fatalf("user discovery: %d %s", r.Code, r.Body.String())
+	}
+	if r := callAPI(h, "GET", "/api/v1/chats/"+first, "", token); r.Code != 200 || !containsText(r.Body.String(), peerLogin) {
+		t.Fatalf("direct title: %d %s", r.Code, r.Body.String())
+	}
+	if r := callAPI(h, "GET", "/api/v1/users?q="+peerLogin, "", ""); r.Code != 401 {
+		t.Fatalf("anonymous discovery: %d", r.Code)
+	}
 }
 
 func TestGroupRolesAndRemovedMember(t *testing.T) {
@@ -78,11 +91,20 @@ func TestGroupRolesAndRemovedMember(t *testing.T) {
 	if r := callAPI(h, "GET", url, "", memberToken); r.Code != 200 {
 		t.Fatalf("member read=%d", r.Code)
 	}
+	if r := callAPI(h, "GET", url+"/members", "", ownerToken); r.Code != 200 || !containsText(r.Body.String(), member) {
+		t.Fatalf("group member list: %d %s", r.Code, r.Body.String())
+	}
+	if r := callAPI(h, "GET", url+"/members", "", outToken); r.Code != 404 {
+		t.Fatalf("outsider members: %d", r.Code)
+	}
 	if r := callAPI(h, "DELETE", url+"/members/"+member, "", ownerToken); r.Code != 204 {
 		t.Fatalf("remove=%d", r.Code)
 	}
 	if r := callAPI(h, "GET", url, "", memberToken); r.Code != 404 {
 		t.Fatalf("removed member read=%d", r.Code)
+	}
+	if r := callAPI(h, "GET", url+"/members", "", memberToken); r.Code != 404 {
+		t.Fatalf("removed member list: %d", r.Code)
 	}
 	if r := callAPI(h, "POST", url+"/leave", "", ownerToken); r.Code != http.StatusConflict {
 		t.Fatalf("owner left without transfer: %d", r.Code)

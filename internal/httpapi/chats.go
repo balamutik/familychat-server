@@ -36,7 +36,8 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 			return
 		}
 		var active bool
-		if err := d.DB.QueryRow(r.Context(), `SELECT NOT disabled FROM users WHERE id=$1`, body.UserID).Scan(&active); err != nil || !active {
+		var peerLogin string
+		if err := d.DB.QueryRow(r.Context(), `SELECT NOT disabled,login FROM users WHERE id=$1`, body.UserID).Scan(&active, &peerLogin); err != nil || !active {
 			writeError(w, 404, "not_found")
 			return
 		}
@@ -76,7 +77,7 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		if created {
 			status = 201
 		}
-		writeJSON(w, status, chatView{ID: id, Kind: "direct", Title: "", Role: "member"})
+		writeJSON(w, status, chatView{ID: id, Kind: "direct", Title: peerLogin, Role: "member"})
 	})
 	protected("POST /api/v1/chats", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -114,7 +115,7 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 	})
 	protected("GET /api/v1/chats", func(w http.ResponseWriter, r *http.Request) {
 		p, _ := auth.PrincipalFrom(r.Context())
-		rows, err := d.DB.Query(r.Context(), `SELECT c.id::text,c.kind,c.title,m.role FROM chats c JOIN chat_members m ON m.chat_id=c.id WHERE m.user_id=$1 AND c.deleted_at IS NULL ORDER BY c.created_at DESC,c.id DESC LIMIT $2`, p.UserID, parseLimit(r))
+		rows, err := d.DB.Query(r.Context(), `SELECT c.id::text,c.kind,CASE WHEN c.kind='direct' THEN (SELECT login FROM users u WHERE u.id=CASE WHEN c.direct_user_low=$1 THEN c.direct_user_high ELSE c.direct_user_low END) ELSE c.title END,m.role FROM chats c JOIN chat_members m ON m.chat_id=c.id WHERE m.user_id=$1 AND c.deleted_at IS NULL ORDER BY c.created_at DESC,c.id DESC LIMIT $2`, p.UserID, parseLimit(r))
 		if err != nil {
 			writeError(w, 500, "internal")
 			return
@@ -143,12 +144,50 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		}
 		p, _ := auth.PrincipalFrom(r.Context())
 		var v chatView
-		err := d.DB.QueryRow(r.Context(), `SELECT c.id::text,c.kind,c.title,m.role FROM chats c JOIN chat_members m ON m.chat_id=c.id WHERE c.id=$1 AND m.user_id=$2 AND c.deleted_at IS NULL`, id, p.UserID).Scan(&v.ID, &v.Kind, &v.Title, &v.Role)
+		err := d.DB.QueryRow(r.Context(), `SELECT c.id::text,c.kind,CASE WHEN c.kind='direct' THEN (SELECT login FROM users u WHERE u.id=CASE WHEN c.direct_user_low=$2 THEN c.direct_user_high ELSE c.direct_user_low END) ELSE c.title END,m.role FROM chats c JOIN chat_members m ON m.chat_id=c.id WHERE c.id=$1 AND m.user_id=$2 AND c.deleted_at IS NULL`, id, p.UserID).Scan(&v.ID, &v.Kind, &v.Title, &v.Role)
 		if err != nil {
 			writeError(w, 404, "not_found")
 			return
 		}
 		writeJSON(w, 200, v)
+	})
+	protected("GET /api/v1/chats/{id}/members", func(w http.ResponseWriter, r *http.Request) {
+		id := r.PathValue("id")
+		if !validUUID(id) {
+			writeError(w, 404, "not_found")
+			return
+		}
+		p, _ := auth.PrincipalFrom(r.Context())
+		var allowed bool
+		if err := d.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM chat_members cm JOIN chats c ON c.id=cm.chat_id WHERE cm.chat_id=$1 AND cm.user_id=$2 AND c.deleted_at IS NULL)`, id, p.UserID).Scan(&allowed); err != nil || !allowed {
+			writeError(w, 404, "not_found")
+			return
+		}
+		rows, err := d.DB.Query(r.Context(), `SELECT u.id::text,u.login,cm.role FROM chat_members cm JOIN users u ON u.id=cm.user_id WHERE cm.chat_id=$1 ORDER BY u.login`, id)
+		if err != nil {
+			writeError(w, 500, "internal")
+			return
+		}
+		defer rows.Close()
+		type member struct {
+			ID    string `json:"id"`
+			Login string `json:"login"`
+			Role  string `json:"role"`
+		}
+		members := []member{}
+		for rows.Next() {
+			var m member
+			if err := rows.Scan(&m.ID, &m.Login, &m.Role); err != nil {
+				writeError(w, 500, "internal")
+				return
+			}
+			members = append(members, m)
+		}
+		if rows.Err() != nil {
+			writeError(w, 500, "internal")
+			return
+		}
+		writeJSON(w, 200, map[string]any{"members": members})
 	})
 	protected("POST /api/v1/chats/{id}/members", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -235,6 +274,9 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		if err = tx.Commit(r.Context()); err != nil {
 			writeError(w, 500, "internal")
 			return
+		}
+		if d.Events != nil {
+			d.Events.CloseUser(target)
 		}
 		w.WriteHeader(204)
 	})

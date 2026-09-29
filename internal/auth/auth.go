@@ -215,11 +215,45 @@ func (s *Service) ChangePassword(ctx context.Context, p Principal, current, newP
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `UPDATE users SET password_hash=$2 WHERE id=$1 AND password_hash=$3`, p.UserID, newHash, hash); err != nil {
+	result, err := tx.Exec(ctx, `UPDATE users SET password_hash=$2 WHERE id=$1 AND password_hash=$3`, p.UserID, newHash, hash)
+	if err != nil {
 		return err
+	}
+	if result.RowsAffected() != 1 {
+		return ErrInvalidCredentials
 	}
 	if _, err = tx.Exec(ctx, `UPDATE sessions SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL`, p.UserID); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
+}
+
+func (s *Service) CreateWebSocketTicket(ctx context.Context, p Principal) (string, error) {
+	token, hash, err := NewToken()
+	if err != nil {
+		return "", err
+	}
+	_, err = s.DB.Exec(ctx, `INSERT INTO ws_tickets(session_id,token_hash,expires_at) VALUES($1,$2,now()+interval '30 seconds')`, p.SessionID, hash)
+	if err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+func (s *Service) ConsumeWebSocketTicket(ctx context.Context, ticket string) (Principal, error) {
+	if len(ticket) != 43 {
+		return Principal{}, ErrUnauthenticated
+	}
+	hash := sha256.Sum256([]byte(ticket))
+	var p Principal
+	err := s.DB.QueryRow(ctx, `WITH consumed AS (
+		UPDATE ws_tickets SET consumed_at=now() WHERE token_hash=$1 AND consumed_at IS NULL AND expires_at>now()
+		RETURNING session_id
+	) SELECT u.id::text,s.id::text,u.login,u.role FROM consumed t
+		JOIN sessions s ON s.id=t.session_id JOIN users u ON u.id=s.user_id
+		WHERE s.revoked_at IS NULL AND s.expires_at>now() AND NOT u.disabled`, hash[:]).Scan(&p.UserID, &p.SessionID, &p.Login, &p.Role)
+	if err != nil {
+		return Principal{}, ErrUnauthenticated
+	}
+	return p, nil
 }

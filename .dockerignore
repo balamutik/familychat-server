@@ -1,0 +1,7 @@
+.git
+.superpowers
+admin/node_modules
+admin/dist
+*.md
+.env
+secrets

@@ -1,0 +1,377 @@
+openapi: 3.1.0
+info:
+  title: FamilyChat API
+  version: 0.1.0
+  description: |
+    All chat, call and file operations require an opaque Bearer session token.
+    File bytes are served only by this API after a current chat membership check.
+    WebSocket upgrade uses a single-use ticket rather than the Bearer token in the URL.
+servers:
+  - url: /api/v1
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+  schemas:
+    Credentials:
+      type: object
+      required: [login, password]
+      properties:
+        login: {type: string, pattern: '^[A-Za-z0-9_]{3,32}$'}
+        password: {type: string, minLength: 12}
+    UUID:
+      type: string
+      format: uuid
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: {type: string}
+    User:
+      type: object
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        login: {type: string}
+        role: {type: string, enum: [admin, user]}
+    MessageInput:
+      type: object
+      required: [client_message_id]
+      properties:
+        client_message_id: {$ref: '#/components/schemas/UUID'}
+        text: {type: string, maxLength: 16000}
+        attachment_ids:
+          type: array
+          maxItems: 10
+          items: {$ref: '#/components/schemas/UUID'}
+    CallInput:
+      type: object
+      required: [kind]
+      properties:
+        kind: {type: string, enum: [audio, video]}
+  parameters:
+    ChatID:
+      name: id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/UUID'}
+    CallID:
+      name: id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/UUID'}
+    FileID:
+      name: id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/UUID'}
+    MemberID:
+      name: userID
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/UUID'}
+  requestBodies:
+    Credentials:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Credentials'}
+    Message:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/MessageInput'}
+    Call:
+      required: true
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/CallInput'}
+security:
+  - bearer: []
+paths:
+  /auth/register:
+    post:
+      security: []
+      summary: Self-register when the administrator has enabled it
+      requestBody: {$ref: '#/components/requestBodies/Credentials'}
+      responses: {'201': {description: Account created}, '403': {description: Registration disabled}}
+  /auth/login:
+    post:
+      security: []
+      summary: Exchange login and password for a revocable Bearer token
+      requestBody: {$ref: '#/components/requestBodies/Credentials'}
+      responses: {'200': {description: Token and user}, '401': {description: Invalid credentials}}
+  /auth/logout:
+    post:
+      summary: Revoke the current session
+      responses: {'204': {description: Logged out}}
+  /auth/change-password:
+    post:
+      summary: Change password and revoke active sessions
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [current_password, new_password]
+              properties:
+                current_password: {type: string}
+                new_password: {type: string}
+      responses: {'204': {description: Changed}}
+  /auth/me:
+    get:
+      summary: Current account
+      responses: {'200': {description: User}}
+  /auth/websocket-ticket:
+    post:
+      summary: Issue a 30-second, single-use WebSocket ticket
+      responses: {'201': {description: Ticket}}
+  /ws:
+    get:
+      security: []
+      summary: Upgrade to WebSocket using a single-use ticket query parameter
+      parameters:
+        - name: ticket
+          in: query
+          required: true
+          schema: {type: string}
+      responses: {'101': {description: WebSocket}}
+  /admin/settings/registration:
+    get:
+      summary: Read self-registration setting (admin)
+      responses: {'200': {description: Setting}}
+    patch:
+      summary: Set self-registration setting (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled: {type: boolean}
+      responses: {'200': {description: Setting}}
+  /admin/users:
+    get:
+      summary: Paginated account list (admin)
+      parameters:
+        - name: q
+          in: query
+          schema: {type: string}
+        - name: cursor
+          in: query
+          schema: {type: string}
+        - name: limit
+          in: query
+          schema: {type: integer, minimum: 1, maximum: 100}
+      responses: {'200': {description: Accounts and next_cursor}}
+    post:
+      summary: Create account (admin)
+      requestBody: {$ref: '#/components/requestBodies/Credentials'}
+      responses: {'201': {description: Account created}}
+  /admin/users/{id}:
+    patch:
+      summary: Block or unblock account (admin)
+      parameters: [{$ref: '#/components/parameters/ChatID'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [disabled]
+              properties:
+                disabled: {type: boolean}
+      responses: {'200': {description: Updated}}
+  /users:
+    get:
+      summary: Find active users by login prefix while authenticated
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: {type: string, minLength: 2, maxLength: 32}
+      responses: {'200': {description: Up to 20 user IDs and logins}}
+  /chats/direct:
+    post:
+      summary: Find or create a direct chat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id]
+              properties:
+                user_id: {$ref: '#/components/schemas/UUID'}
+      responses: {'201': {description: Direct chat}}
+  /chats:
+    get:
+      summary: Current user's chats
+      responses: {'200': {description: Chats}}
+    post:
+      summary: Create group chat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title: {type: string}
+      responses: {'201': {description: Group chat}}
+  /chats/{id}:
+    parameters: [{$ref: '#/components/parameters/ChatID'}]
+    get:
+      summary: Chat detail for current member
+      responses: {'200': {description: Chat}, '404': {description: Not a member}}
+    delete:
+      summary: Delete group chat as owner
+      responses: {'204': {description: Deleted}}
+  /chats/{id}/members:
+    get:
+      summary: List members, logins and chat roles for a current member
+      parameters: [{$ref: '#/components/parameters/ChatID'}]
+      responses: {'200': {description: Members}, '404': {description: Not a member}}
+    post:
+      summary: Add a member to a group
+      parameters: [{$ref: '#/components/parameters/ChatID'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id]
+              properties:
+                user_id: {$ref: '#/components/schemas/UUID'}
+      responses: {'201': {description: Added}}
+  /chats/{id}/members/{userID}:
+    delete:
+      summary: Remove a member and immediately revoke their file access
+      parameters: [{$ref: '#/components/parameters/ChatID'}, {$ref: '#/components/parameters/MemberID'}]
+      responses: {'204': {description: Removed}}
+  /chats/{id}/leave:
+    post:
+      summary: Leave a group
+      parameters: [{$ref: '#/components/parameters/ChatID'}]
+      responses: {'204': {description: Left}}
+  /chats/{id}/owner:
+    post:
+      summary: Transfer group ownership
+      parameters: [{$ref: '#/components/parameters/ChatID'}]
+      responses: {'200': {description: Ownership transferred}}
+  /chats/{id}/messages:
+    parameters: [{$ref: '#/components/parameters/ChatID'}]
+    get:
+      summary: History ordered by message sequence
+      parameters:
+        - name: before
+          in: query
+          schema: {type: integer}
+        - name: after
+          in: query
+          schema: {type: integer}
+        - name: limit
+          in: query
+          schema: {type: integer}
+      responses: {'200': {description: Messages}}
+    post:
+      summary: Send idempotent message with existing attachments
+      requestBody: {$ref: '#/components/requestBodies/Message'}
+      responses: {'201': {description: Created}, '200': {description: Identical retry}, '409': {description: Conflicting retry}}
+  /chats/{id}/read:
+    post:
+      summary: Mark a sequence read
+      parameters: [{$ref: '#/components/parameters/ChatID'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [seq]
+              properties:
+                seq: {type: integer, minimum: 0}
+      responses: {'200': {description: Read position}}
+  /chats/{id}/search:
+    get:
+      summary: Search text and attachment filenames within this chat
+      parameters:
+        - {$ref: '#/components/parameters/ChatID'}
+        - name: q
+          in: query
+          required: true
+          schema: {type: string}
+      responses: {'200': {description: Results}}
+  /chats/{id}/files:
+    post:
+      summary: Stream a file through the API to private S3
+      parameters: [{$ref: '#/components/parameters/ChatID'}]
+      requestBody:
+        required: true
+        description: Requires Content-Length and X-File-Name request headers.
+        content:
+          application/octet-stream:
+            schema: {type: string, format: binary}
+      responses: {'201': {description: Attachment metadata}}
+  /files/{id}:
+    get:
+      summary: Attachment metadata for a current chat member
+      parameters: [{$ref: '#/components/parameters/FileID'}]
+      responses: {'200': {description: Metadata}, '404': {description: Inaccessible or absent}}
+  /files/{id}/content:
+    parameters: [{$ref: '#/components/parameters/FileID'}]
+    get:
+      summary: Authorized original bytes; supports Range
+      responses: {'200': {description: Bytes}, '206': {description: Byte range}, '404': {description: Inaccessible or absent}}
+    head:
+      summary: Authorized original metadata
+      responses: {'200': {description: Headers}, '206': {description: Range headers}}
+  /files/{id}/preview:
+    parameters: [{$ref: '#/components/parameters/FileID'}]
+    get:
+      summary: Authorized generated preview; supports Range
+      responses: {'200': {description: JPEG preview}, '404': {description: Unavailable}}
+    head:
+      summary: Authorized preview headers
+      responses: {'200': {description: Headers}}
+  /chats/{id}/calls:
+    post:
+      summary: Start a one-to-one audio or video call
+      parameters: [{$ref: '#/components/parameters/ChatID'}]
+      requestBody: {$ref: '#/components/requestBodies/Call'}
+      responses: {'201': {description: Ringing}, '409': {description: Either participant busy}}
+  /calls/{id}:
+    get:
+      summary: Call state for participant
+      parameters: [{$ref: '#/components/parameters/CallID'}]
+      responses: {'200': {description: Call}, '404': {description: Inaccessible}}
+  /calls/{id}/accept:
+    post:
+      summary: Accept from this device
+      parameters: [{$ref: '#/components/parameters/CallID'}]
+      responses: {'200': {description: Accepted}}
+  /calls/{id}/reject:
+    post:
+      summary: Reject as callee
+      parameters: [{$ref: '#/components/parameters/CallID'}]
+      responses: {'200': {description: Rejected}}
+  /calls/{id}/cancel:
+    post:
+      summary: Cancel as caller
+      parameters: [{$ref: '#/components/parameters/CallID'}]
+      responses: {'200': {description: Cancelled}}
+  /calls/{id}/end:
+    post:
+      summary: End active call
+      parameters: [{$ref: '#/components/parameters/CallID'}]
+      responses: {'200': {description: Ended}}
+  /calls/{id}/ice:
+    get:
+      summary: Temporary TURN REST credentials for active call participant
+      parameters: [{$ref: '#/components/parameters/CallID'}]
+      responses: {'200': {description: ICE servers and expiry}, '409': {description: Inactive call}}

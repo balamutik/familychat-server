@@ -1,0 +1,7 @@
+.env
+admin/node_modules/
+admin/dist/
+secrets/
+*.log
+__pycache__/
+*.pyc

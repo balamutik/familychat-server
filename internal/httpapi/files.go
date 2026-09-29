@@ -113,6 +113,22 @@ func registerFiles(mux *http.ServeMux, d Dependencies) {
 			return
 		}
 		committed := false
+		stopRenew := make(chan struct{})
+		defer close(stopRenew)
+		go func() {
+			ticker := time.NewTicker(time.Minute)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-stopRenew:
+					return
+				case <-r.Context().Done():
+					return
+				case <-ticker.C:
+					_, _ = d.DB.Exec(r.Context(), `UPDATE upload_reservations SET expires_at=now()+interval '30 minutes' WHERE id=$1 AND state='uploading'`, reservationID)
+				}
+			}
+		}()
 		defer func() {
 			if !committed {
 				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -141,6 +157,11 @@ func registerFiles(mux *http.ServeMux, d Dependencies) {
 			return
 		}
 		defer finalTx.Rollback(r.Context())
+		var reservationState string
+		if err = finalTx.QueryRow(r.Context(), `SELECT state FROM upload_reservations WHERE id=$1 FOR UPDATE`, reservationID).Scan(&reservationState); err != nil || reservationState != "uploading" {
+			writeError(w, 409, "upload_expired")
+			return
+		}
 		if _, _, err = chatRole(r, finalTx, chatID, p.UserID); err != nil {
 			writeError(w, 404, "not_found")
 			return
@@ -290,7 +311,9 @@ func serveFile(w http.ResponseWriter, r *http.Request, d Dependencies, preview b
 		w.Header().Set("Content-Range", contentRange)
 	}
 	disposition := "attachment"
-	if preview || strings.HasPrefix(ctype, "image/") || strings.HasPrefix(ctype, "video/") {
+	mediaType := strings.ToLower(strings.TrimSpace(strings.SplitN(ctype, ";", 2)[0]))
+	inlineMedia := map[string]bool{"image/jpeg": true, "image/png": true, "image/gif": true, "image/webp": true, "image/avif": true, "video/mp4": true, "video/webm": true, "video/quicktime": true}
+	if preview || inlineMedia[mediaType] {
 		disposition = "inline"
 	}
 	w.Header().Set("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": m.Filename}))

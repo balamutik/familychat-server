@@ -1,24 +1,28 @@
 package httpapi
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
 
 	"familychat/server/internal/auth"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type messageView struct {
-	ID              string `json:"id"`
-	ChatID          string `json:"chat_id"`
-	Seq             int64  `json:"seq"`
-	SenderID        string `json:"sender_id"`
-	ClientMessageID string `json:"client_message_id"`
-	Text            string `json:"text"`
-	CreatedAt       string `json:"created_at"`
+	ID              string     `json:"id"`
+	ChatID          string     `json:"chat_id"`
+	Seq             int64      `json:"seq"`
+	SenderID        string     `json:"sender_id"`
+	ClientMessageID string     `json:"client_message_id"`
+	Text            string     `json:"text"`
+	CreatedAt       string     `json:"created_at"`
+	Attachments     []fileMeta `json:"attachments"`
 }
 
 func registerMessages(mux *http.ServeMux, d Dependencies) {
@@ -52,11 +56,47 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 		var existingText string
 		err = tx.QueryRow(r.Context(), `SELECT id::text,chat_id::text,seq,sender_id::text,client_message_id::text,body,created_at::text FROM messages WHERE chat_id=$1 AND sender_id=$2 AND client_message_id=$3`, chatID, p.UserID, body.ClientMessageID).Scan(&v.ID, &v.ChatID, &v.Seq, &v.SenderID, &v.ClientMessageID, &existingText, &v.CreatedAt)
 		if err == nil {
-			if existingText != body.Text {
+			rows, queryErr := tx.Query(r.Context(), `SELECT attachment_id::text FROM message_attachments WHERE message_id=$1 ORDER BY attachment_id`, v.ID)
+			if queryErr != nil {
+				writeError(w, 500, "internal")
+				return
+			}
+			existingIDs := []string{}
+			for rows.Next() {
+				var id string
+				if scanErr := rows.Scan(&id); scanErr != nil {
+					rows.Close()
+					writeError(w, 500, "internal")
+					return
+				}
+				existingIDs = append(existingIDs, id)
+			}
+			queryErr = rows.Err()
+			rows.Close()
+			if queryErr != nil {
+				writeError(w, 500, "internal")
+				return
+			}
+			requestedIDs := append([]string(nil), body.AttachmentIDs...)
+			sort.Strings(requestedIDs)
+			sameIDs := len(existingIDs) == len(requestedIDs)
+			if sameIDs {
+				for i := range existingIDs {
+					if existingIDs[i] != requestedIDs[i] {
+						sameIDs = false
+						break
+					}
+				}
+			}
+			if existingText != body.Text || !sameIDs {
 				writeError(w, 409, "message_id_conflict")
 				return
 			}
 			v.Text = existingText
+			if err := attachMetadata(r.Context(), d.DB, []*messageView{&v}); err != nil {
+				writeError(w, 500, "internal")
+				return
+			}
 			writeJSON(w, 200, v)
 			return
 		}
@@ -109,6 +149,10 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 		v.SenderID = p.UserID
 		v.ClientMessageID = body.ClientMessageID
 		v.Text = body.Text
+		if err := attachMetadata(r.Context(), d.DB, []*messageView{&v}); err != nil {
+			writeError(w, 500, "internal")
+			return
+		}
 		writeJSON(w, 201, v)
 	})
 	protected("GET /api/v1/chats/{id}/messages", func(w http.ResponseWriter, r *http.Request) {
@@ -168,10 +212,15 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 			writeError(w, 500, "internal")
 			return
 		}
+		rows.Close()
 		// An empty page still must not reveal whether an inaccessible chat exists.
 		var allowed bool
 		if err := d.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM chat_members cm JOIN chats c ON c.id=cm.chat_id WHERE cm.chat_id=$1 AND cm.user_id=$2 AND c.deleted_at IS NULL)`, id, p.UserID).Scan(&allowed); err != nil || !allowed {
 			writeError(w, 404, "not_found")
+			return
+		}
+		if err := attachMetadataList(r.Context(), d.DB, messages); err != nil {
+			writeError(w, 500, "internal")
 			return
 		}
 		writeJSON(w, 200, map[string]any{"messages": messages})
@@ -246,11 +295,55 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 			writeError(w, 500, "internal")
 			return
 		}
+		rows.Close()
 		var allowed bool
 		if err := d.DB.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM chat_members cm JOIN chats c ON c.id=cm.chat_id WHERE cm.chat_id=$1 AND cm.user_id=$2 AND c.deleted_at IS NULL)`, id, p.UserID).Scan(&allowed); err != nil || !allowed {
 			writeError(w, 404, "not_found")
 			return
 		}
+		if err := attachMetadataList(r.Context(), d.DB, messages); err != nil {
+			writeError(w, 500, "internal")
+			return
+		}
 		writeJSON(w, 200, map[string]any{"messages": messages})
 	})
+}
+
+func attachMetadataList(ctx context.Context, db *pgxpool.Pool, messages []messageView) error {
+	refs := make([]*messageView, 0, len(messages))
+	for i := range messages {
+		refs = append(refs, &messages[i])
+	}
+	return attachMetadata(ctx, db, refs)
+}
+
+func attachMetadata(ctx context.Context, db *pgxpool.Pool, messages []*messageView) error {
+	if len(messages) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(messages))
+	byID := make(map[string]*messageView, len(messages))
+	for _, v := range messages {
+		v.Attachments = []fileMeta{}
+		ids = append(ids, v.ID)
+		byID[v.ID] = v
+	}
+	rows, err := db.Query(ctx, `SELECT ma.message_id::text,a.id::text,a.chat_id::text,a.filename,a.content_type,a.size_bytes,a.preview_state
+		FROM message_attachments ma JOIN attachments a ON a.id=ma.attachment_id
+		WHERE ma.message_id=ANY($1::uuid[]) ORDER BY ma.message_id,a.id`, ids)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var messageID string
+		var a fileMeta
+		if err := rows.Scan(&messageID, &a.ID, &a.ChatID, &a.Filename, &a.ContentType, &a.Size, &a.PreviewState); err != nil {
+			return err
+		}
+		if v := byID[messageID]; v != nil {
+			v.Attachments = append(v.Attachments, a)
+		}
+	}
+	return rows.Err()
 }

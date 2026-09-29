@@ -1,0 +1,97 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: familychat
+      POSTGRES_USER: familychat
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U familychat -d familychat"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  s3:
+    image: chrislusf/seaweedfs:4.38
+    command: ["mini", "-dir=/data"]
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY}
+      S3_BUCKET: familychat
+    volumes:
+      - s3_data:/data
+    restart: unless-stopped
+
+  api:
+    build: .
+    command: ["serve"]
+    environment: &server_env
+      LISTEN_ADDR: ":8080"
+      DATABASE_URL: postgres://familychat:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/familychat?sslmode=disable
+      S3_ENDPOINT: http://s3:8333
+      S3_REGION: us-east-1
+      S3_BUCKET: familychat
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?set S3_ACCESS_KEY}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?set S3_SECRET_KEY}
+      S3_USE_PATH_STYLE: "true"
+      TURN_URL: ${TURN_URL:?set TURN_URL}
+      TURN_SECRET: ${TURN_SECRET:?set TURN_SECRET}
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-localhost}
+      ADMIN_LOGIN: ${ADMIN_LOGIN:-admin}
+      ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+    secrets:
+      - admin_password
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres: {condition: service_healthy}
+      s3: {condition: service_started}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/familychat", "healthcheck"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  worker:
+    build: .
+    command: ["worker"]
+    environment: *server_env
+    depends_on:
+      postgres: {condition: service_healthy}
+      s3: {condition: service_started}
+    restart: unless-stopped
+
+  turn:
+    image: coturn/coturn:4.18.0-r0
+    command:
+      - --no-cli
+      - --no-multicast-peers
+      - --use-auth-secret
+      - --static-auth-secret=${TURN_SECRET:?set TURN_SECRET}
+      - --realm=familychat.local
+      - --external-ip=${TURN_EXTERNAL_IP:-127.0.0.1}
+      - --listening-port=3478
+      - --min-port=55000
+      - --max-port=55039
+      - --user-quota=4
+      - --total-quota=100
+      - --denied-peer-ip=10.0.0.0-10.255.255.255
+      - --denied-peer-ip=172.16.0.0-172.31.255.255
+      - --denied-peer-ip=192.168.0.0-192.168.255.255
+      - --denied-peer-ip=169.254.0.0-169.254.255.255
+    ports:
+      - "3478:3478/tcp"
+      - "3478:3478/udp"
+      - "55000-55039:55000-55039/udp"
+    restart: unless-stopped
+
+secrets:
+  admin_password:
+    file: ./secrets/admin-password.txt
+volumes:
+  postgres_data:
+  s3_data:

@@ -3,6 +3,7 @@ package httpapi
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -28,7 +29,7 @@ func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 		return false
 	}
 	var extra any
-	if err := dec.Decode(&extra); err == nil {
+	if err := dec.Decode(&extra); err != io.EOF {
 		writeError(w, 400, "invalid_json")
 		return false
 	}
@@ -138,6 +139,9 @@ func registerAuth(mux *http.ServeMux, d Dependencies) {
 			writeError(w, 500, "internal")
 			return
 		}
+		if d.Events != nil {
+			d.Events.CloseSession(p.SessionID)
+		}
 		w.WriteHeader(204)
 	})))
 	mux.Handle("POST /api/v1/auth/change-password", require(d.Auth, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -161,6 +165,9 @@ func registerAuth(mux *http.ServeMux, d Dependencies) {
 		if err != nil {
 			writeError(w, 500, "internal")
 			return
+		}
+		if d.Events != nil {
+			d.Events.CloseUser(p.UserID)
 		}
 		w.WriteHeader(204)
 	})))

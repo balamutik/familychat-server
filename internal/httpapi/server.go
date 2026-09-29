@@ -2,13 +2,14 @@ package httpapi
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"time"
 
 	"familychat/server/internal/auth"
+	"familychat/server/internal/events"
 	"familychat/server/internal/objects"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"io"
 )
 
 type ObjectHealth interface{ Ping(context.Context) error }
@@ -26,6 +27,11 @@ type Dependencies struct {
 	Auth           *auth.Service
 	MaxFileBytes   int64
 	UserQuotaBytes int64
+	Events         *events.Hub
+	AllowedOrigins []string
+	TurnURL        string
+	TurnSecret     string
+	AdminStaticDir string
 }
 
 func New(deps Dependencies) http.Handler {
@@ -47,8 +53,12 @@ func New(deps Dependencies) http.Handler {
 	})
 	registerAuth(mux, deps)
 	registerChats(mux, deps)
+	registerUsers(mux, deps)
 	registerMessages(mux, deps)
 	registerFiles(mux, deps)
+	registerWebsocket(mux, deps)
+	registerCalls(mux, deps)
+	registerAdminUI(mux, deps.AdminStaticDir)
 	return mux
 }
 
