@@ -1,0 +1,225 @@
+package auth
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"errors"
+	"net/http"
+	"regexp"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+var ErrUnauthenticated = errors.New("unauthenticated")
+var ErrInvalidCredentials = errors.New("invalid credentials")
+var ErrRegistrationClosed = errors.New("registration closed")
+var ErrConflict = errors.New("conflict")
+var ErrInvalidInput = errors.New("invalid input")
+
+var loginPattern = regexp.MustCompile(`^[A-Za-z0-9_]{3,32}$`)
+
+type Principal struct {
+	UserID    string `json:"id"`
+	SessionID string `json:"-"`
+	Login     string `json:"login"`
+	Role      string `json:"role"`
+}
+
+type Service struct {
+	DB  *pgxpool.Pool
+	TTL time.Duration
+}
+
+type principalKey struct{}
+
+func PrincipalFrom(ctx context.Context) (Principal, bool) {
+	p, ok := ctx.Value(principalKey{}).(Principal)
+	return p, ok
+}
+
+func Bearer(r *http.Request) (string, bool) {
+	h := r.Header.Get("Authorization")
+	if !strings.HasPrefix(h, "Bearer ") {
+		return "", false
+	}
+	token := strings.TrimPrefix(h, "Bearer ")
+	if token == "" || strings.TrimSpace(token) != token || strings.ContainsAny(token, " \t\r\n") {
+		return "", false
+	}
+	return token, true
+}
+
+func (s *Service) Require(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		token, ok := Bearer(r)
+		if !ok || s == nil || s.DB == nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		p, err := s.Authenticate(r.Context(), token)
+		if err != nil {
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), principalKey{}, p)))
+	})
+}
+
+func (s *Service) Authenticate(ctx context.Context, token string) (Principal, error) {
+	if len(token) != 43 {
+		return Principal{}, ErrUnauthenticated
+	}
+	h := sha256.Sum256([]byte(token))
+	var p Principal
+	err := s.DB.QueryRow(ctx, `SELECT u.id::text,s.id::text,u.login,u.role
+		FROM sessions s JOIN users u ON u.id=s.user_id
+		WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>now() AND NOT u.disabled`, h[:]).Scan(&p.UserID, &p.SessionID, &p.Login, &p.Role)
+	if err != nil {
+		return Principal{}, ErrUnauthenticated
+	}
+	return p, nil
+}
+
+func NewToken() (string, []byte, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", nil, err
+	}
+	token := base64.RawURLEncoding.EncodeToString(buf)
+	h := sha256.Sum256([]byte(token))
+	return token, h[:], nil
+}
+
+func NormalizeLogin(login string) (string, error) {
+	if !loginPattern.MatchString(login) {
+		return "", ErrInvalidInput
+	}
+	return strings.ToLower(login), nil
+}
+
+func (s *Service) Register(ctx context.Context, login, password string) (Principal, error) {
+	login, err := NormalizeLogin(login)
+	if err != nil {
+		return Principal{}, err
+	}
+	hash, err := HashPassword(password)
+	if err != nil {
+		return Principal{}, ErrInvalidInput
+	}
+	tx, err := s.DB.Begin(ctx)
+	if err != nil {
+		return Principal{}, err
+	}
+	defer tx.Rollback(ctx)
+	var enabled bool
+	if err := tx.QueryRow(ctx, `SELECT registration_enabled FROM settings WHERE singleton=true FOR SHARE`).Scan(&enabled); err != nil {
+		return Principal{}, err
+	}
+	if !enabled {
+		return Principal{}, ErrRegistrationClosed
+	}
+	var p Principal
+	if err := tx.QueryRow(ctx, `INSERT INTO users(login,password_hash) VALUES($1,$2) RETURNING id::text,login,role`, login, hash).Scan(&p.UserID, &p.Login, &p.Role); err != nil {
+		var pgerr *pgconn.PgError
+		if errors.As(err, &pgerr) && pgerr.Code == "23505" {
+			return Principal{}, ErrConflict
+		}
+		return Principal{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Principal{}, err
+	}
+	return p, nil
+}
+
+func (s *Service) CreateUser(ctx context.Context, login, password string) (Principal, error) {
+	login, err := NormalizeLogin(login)
+	if err != nil {
+		return Principal{}, err
+	}
+	hash, err := HashPassword(password)
+	if err != nil {
+		return Principal{}, ErrInvalidInput
+	}
+	var p Principal
+	err = s.DB.QueryRow(ctx, `INSERT INTO users(login,password_hash) VALUES($1,$2) RETURNING id::text,login,role`, login, hash).Scan(&p.UserID, &p.Login, &p.Role)
+	if err != nil {
+		var pgerr *pgconn.PgError
+		if errors.As(err, &pgerr) && pgerr.Code == "23505" {
+			return Principal{}, ErrConflict
+		}
+		return Principal{}, err
+	}
+	return p, nil
+}
+
+func (s *Service) Login(ctx context.Context, login, password string) (string, Principal, error) {
+	login, err := NormalizeLogin(login)
+	if err != nil {
+		return "", Principal{}, ErrInvalidCredentials
+	}
+	var p Principal
+	var hash string
+	err = s.DB.QueryRow(ctx, `SELECT id::text,login,role,password_hash FROM users WHERE login=$1 AND NOT disabled`, login).Scan(&p.UserID, &p.Login, &p.Role, &hash)
+	if err != nil {
+		return "", Principal{}, ErrInvalidCredentials
+	}
+	if !VerifyPassword(hash, password) {
+		return "", Principal{}, ErrInvalidCredentials
+	}
+	token, tokenHash, err := NewToken()
+	if err != nil {
+		return "", Principal{}, err
+	}
+	ttl := s.TTL
+	if ttl <= 0 {
+		ttl = 30 * 24 * time.Hour
+	}
+	err = s.DB.QueryRow(ctx, `INSERT INTO sessions(user_id,token_hash,expires_at) VALUES($1,$2,now()+$3::interval) RETURNING id::text`, p.UserID, tokenHash, ttl.String()).Scan(&p.SessionID)
+	if err != nil {
+		return "", Principal{}, err
+	}
+	return token, p, nil
+}
+
+func (s *Service) RevokeSession(ctx context.Context, sessionID string) error {
+	_, err := s.DB.Exec(ctx, `UPDATE sessions SET revoked_at=now() WHERE id=$1 AND revoked_at IS NULL`, sessionID)
+	return err
+}
+
+func (s *Service) RevokeUser(ctx context.Context, userID string) error {
+	_, err := s.DB.Exec(ctx, `UPDATE sessions SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL`, userID)
+	return err
+}
+
+func (s *Service) ChangePassword(ctx context.Context, p Principal, current, newPassword string) error {
+	var hash string
+	if err := s.DB.QueryRow(ctx, `SELECT password_hash FROM users WHERE id=$1 AND NOT disabled`, p.UserID).Scan(&hash); err != nil {
+		return ErrInvalidCredentials
+	}
+	if !VerifyPassword(hash, current) {
+		return ErrInvalidCredentials
+	}
+	newHash, err := HashPassword(newPassword)
+	if err != nil {
+		return ErrInvalidInput
+	}
+	tx, err := s.DB.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err = tx.Exec(ctx, `UPDATE users SET password_hash=$2 WHERE id=$1 AND password_hash=$3`, p.UserID, newHash, hash); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE sessions SET revoked_at=now() WHERE user_id=$1 AND revoked_at IS NULL`, p.UserID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
