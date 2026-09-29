@@ -60,4 +60,8 @@ go test ./...
 go vet ./...
 cd admin && npm ci && npm run build
 docker compose config -q
+python3 tests/integration/live_compose.py
+python3 tests/integration/turn_probe.py
 ```
+
+Первые три проверки работают без внешних сервисов; Go-интеграционные тесты используют `TEST_DATABASE_URL`, `TEST_S3_ENDPOINT`, `TEST_S3_ACCESS_KEY` и `TEST_S3_SECRET_KEY` для отдельной тестовой базы и бакета `familychat-test`. Два Python-сценария проверяют уже запущенный Compose; `live_compose.py` создаёт тестовые аккаунты и сообщения в его локальной базе.
