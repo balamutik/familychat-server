@@ -1,0 +1,1070 @@
+openapi: 3.1.0
+info:
+  title: FamilyChat Mobile API
+  version: 0.1.0
+  description: |
+    Контракт действующего Go-сервера для мобильных клиентов. Базовый путь — /api/v1.
+    Все операции, кроме регистрации, входа и WebSocket upgrade, требуют
+    Authorization: Bearer <token>. Самостоятельная регистрация доступна только
+    когда её включил администратор; телефон, почта и приглашение не нужны.
+
+    Вложения и превью всегда скачиваются через API с Bearer-заголовком.
+    До отправки сообщения файл видит только загрузивший его участник чата;
+    после отправки — текущие участники. Удаление участника или отзыв сессии
+    блокируют последующие запросы. Публичных и подписанных S3 URL нет.
+
+    OpenAPI описывает HTTP handshake WebSocket. Форматы кадров описаны ниже
+    в x-websocket-messages; обычные генераторы HTTP-клиента их не создают.
+    Для мобильного клиента после разрыва соединения REST-история остаётся
+    источником истины, а повторные события следует устранять по id.
+    Push-уведомлений для спящего приложения в этой версии нет; входящий звонок
+    доставляется через активное WebSocket-соединение.
+servers:
+  - url: /api/v1
+    description: Тот же origin, что и сервер; в мобильном приложении задайте HTTPS base URL.
+tags:
+  - name: Auth
+  - name: Users
+  - name: Chats
+  - name: Messages
+  - name: Files
+  - name: Events
+  - name: Calls
+security:
+  - bearerAuth: []
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Непрозрачный токен из POST /auth/login; передавать в заголовке, не в URL.
+  schemas:
+    UUID:
+      type: string
+      format: uuid
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Машиночитаемый код ошибки, например not_found или busy.
+    Credentials:
+      type: object
+      additionalProperties: false
+      required: [login, password]
+      properties:
+        login:
+          type: string
+          pattern: '^[A-Za-z0-9_]{3,32}$'
+          description: Логин нормализуется сервером в нижний регистр.
+        password:
+          type: string
+          minLength: 12
+          maxLength: 128
+          description: Ограничение по длине относится к Unicode-символам; максимум 512 байт UTF-8.
+    ChangePassword:
+      type: object
+      additionalProperties: false
+      required: [current_password, new_password]
+      properties:
+        current_password: {type: string}
+        new_password: {type: string, minLength: 12, maxLength: 128}
+    User:
+      type: object
+      required: [id, login, role]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        login: {type: string}
+        role: {type: string, enum: [user, admin]}
+    UserSearchItem:
+      type: object
+      required: [id, login]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        login: {type: string}
+    LoginResult:
+      type: object
+      required: [token, user]
+      properties:
+        token:
+          type: string
+          description: Секрет текущей сессии; сохраняйте в защищённом хранилище устройства.
+        user: {$ref: '#/components/schemas/User'}
+    WebSocketTicket:
+      type: object
+      required: [ticket]
+      properties:
+        ticket:
+          type: string
+          description: Одноразовый билет, срок действия 30 секунд.
+    Chat:
+      type: object
+      required: [id, kind, title, role]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        kind: {type: string, enum: [direct, group]}
+        title:
+          type: string
+          description: В личном чате это актуальный логин собеседника.
+        role: {type: string, enum: [owner, admin, member]}
+    Member:
+      type: object
+      required: [id, login, role]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        login: {type: string}
+        role: {type: string, enum: [owner, admin, member]}
+    UserIDInput:
+      type: object
+      additionalProperties: false
+      required: [user_id]
+      properties:
+        user_id: {$ref: '#/components/schemas/UUID'}
+    GroupInput:
+      type: object
+      additionalProperties: false
+      required: [title]
+      properties:
+        title: {type: string, minLength: 1, maxLength: 100}
+    AddedMember:
+      type: object
+      required: [user_id, role]
+      properties:
+        user_id: {$ref: '#/components/schemas/UUID'}
+        role: {type: string, const: member}
+    OwnerResult:
+      type: object
+      required: [owner_id]
+      properties:
+        owner_id: {$ref: '#/components/schemas/UUID'}
+    Attachment:
+      type: object
+      required: [id, chat_id, filename, content_type, size, preview_state]
+      description: |
+        Здесь нет готового URL: сформируйте /files/{id}/content и /files/{id}/preview
+        относительно /api/v1. Preview доступен только при preview_state=ready.
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        chat_id: {$ref: '#/components/schemas/UUID'}
+        filename: {type: string}
+        content_type: {type: string, description: MIME тип, указанный при загрузке.}
+        size: {type: integer, format: int64, minimum: 1, description: Размер оригинала в байтах.}
+        preview_state:
+          type: string
+          enum: [pending, processing, ready, failed, unsupported]
+    MessageInput:
+      type: object
+      additionalProperties: false
+      required: [client_message_id]
+      description: Нужны непустой text и/или хотя бы один attachment_id.
+      properties:
+        client_message_id:
+          $ref: '#/components/schemas/UUID'
+        text: {type: string, maxLength: 16000, default: ''}
+        attachment_ids:
+          type: array
+          maxItems: 10
+          uniqueItems: true
+          items: {$ref: '#/components/schemas/UUID'}
+    Message:
+      type: object
+      required: [id, chat_id, seq, sender_id, client_message_id, text, created_at, attachments]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        chat_id: {$ref: '#/components/schemas/UUID'}
+        seq: {type: integer, format: int64, minimum: 1, description: Порядковый номер внутри чата.}
+        sender_id: {$ref: '#/components/schemas/UUID'}
+        client_message_id: {$ref: '#/components/schemas/UUID'}
+        text: {type: string}
+        created_at:
+          type: string
+          description: Временная метка PostgreSQL с часовым поясом; сервер возвращает поле как текст.
+        attachments:
+          type: array
+          items: {$ref: '#/components/schemas/Attachment'}
+    ReadInput:
+      type: object
+      additionalProperties: false
+      required: [seq]
+      properties:
+        seq: {type: integer, format: int64, minimum: 0}
+    ReadPosition:
+      type: object
+      required: [read_seq]
+      properties:
+        read_seq: {type: integer, format: int64, minimum: 0}
+    CallInput:
+      type: object
+      additionalProperties: false
+      required: [kind]
+      properties:
+        kind: {type: string, enum: [audio, video]}
+    Call:
+      type: object
+      required: [id, chat_id, caller_id, callee_id, kind, state, created_at]
+      properties:
+        id: {$ref: '#/components/schemas/UUID'}
+        chat_id: {$ref: '#/components/schemas/UUID'}
+        caller_id: {$ref: '#/components/schemas/UUID'}
+        callee_id: {$ref: '#/components/schemas/UUID'}
+        kind: {type: string, enum: [audio, video]}
+        state: {type: string, enum: [ringing, accepted, rejected, cancelled, missed, ended]}
+        created_at: {type: string, format: date-time}
+    IceServer:
+      type: object
+      required: [urls, username, credential]
+      properties:
+        urls:
+          type: array
+          items: {type: string}
+        username: {type: string}
+        credential: {type: string}
+    IceConfig:
+      type: object
+      required: [ice_servers, expires_at]
+      properties:
+        ice_servers:
+          type: array
+          items: {$ref: '#/components/schemas/IceServer'}
+        expires_at:
+          type: integer
+          format: int64
+          description: Unix time в секундах; запрашивайте новые реквизиты во время долгого звонка.
+    Event:
+      type: object
+      required: [id, type, chat_id, occurred_at, data]
+      properties:
+        id: {type: integer, format: int64, description: Глобальный курсор событий.}
+        type:
+          type: string
+          enum: [message, call_ringing, call_accepted, call_rejected, call_cancelled, call_ended, call_timeout]
+        chat_id: {$ref: '#/components/schemas/UUID'}
+        occurred_at: {type: string, format: date-time}
+        data:
+          type: object
+          description: |
+            message = {message_id, seq}; call_ringing = {call_id, caller_id,
+            callee_id, kind}; call_accepted/rejected/cancelled/ended =
+            {call_id, state}; call_timeout = {call_id}. Для полного состояния
+            получите сообщение или звонок через HTTP.
+    Signal:
+      type: object
+      required: [type, call_id, data]
+      properties:
+        type: {type: string, enum: [offer, answer, ice]}
+        call_id: {$ref: '#/components/schemas/UUID'}
+        data:
+          description: JSON с SDP или ICE candidate, передаётся другому устройству без сохранения.
+    SyncFrame:
+      type: object
+      required: [type, after_event_id]
+      properties:
+        type: {type: string, const: sync}
+        after_event_id: {type: integer, format: int64, minimum: 0}
+  parameters:
+    ChatID:
+      name: id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/UUID'}
+    FileID:
+      name: id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/UUID'}
+    CallID:
+      name: id
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/UUID'}
+    UserID:
+      name: userID
+      in: path
+      required: true
+      schema: {$ref: '#/components/schemas/UUID'}
+    Limit:
+      name: limit
+      in: query
+      description: По умолчанию 50; значения выше 100 ограничиваются сервером до 100.
+      schema: {type: integer, minimum: 1, maximum: 100, default: 50}
+    Range:
+      name: Range
+      in: header
+      description: Один диапазон bytes=start-end или bytes=-suffix; требуется новый Bearer при каждом запросе.
+      schema: {type: string}
+      example: bytes=0-1048575
+  responses:
+    BadRequest:
+      description: Неверный ввод или запрос.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Unauthorized:
+      description: Нет действующего Bearer-токена. Middleware возвращает JSON-текст с Content-Type text/plain.
+      content:
+        text/plain:
+          schema: {type: string}
+          example: '{"error":"unauthorized"}'
+    Forbidden:
+      description: Недостаточно прав для операции.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    NotFound:
+      description: Объект отсутствует или недоступен текущему пользователю.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Conflict:
+      description: Конфликт состояния или повтор запроса с другим содержимым.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    TooLarge:
+      description: Размер файла или квота превышены.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    RateLimited:
+      description: Слишком много попыток входа или регистрации.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Unavailable:
+      description: Временная недоступность сервиса.
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    NoContent:
+      description: Успешно; тело ответа отсутствует.
+x-websocket-messages:
+  endpoint: /api/v1/ws?ticket={ticket}
+  description: |
+    Сначала получите билет через POST /auth/websocket-ticket с Bearer. Билет
+    действует 30 секунд и расходуется один раз. Отправьте SyncFrame после
+    подключения; replay выдаёт не более 100 доступных событий за запрос.
+    Сохраняйте последний event.id и повторяйте sync для догрузки. Сервер
+    проверяет членство в чате при выдаче каждого события. Ping каждые 25 с;
+    клиент должен отвечать pong. Кадры сигнализации — максимум 30/с,
+    data — не более 32 КиБ, весь входной кадр — не более 64 КиБ.
+  clientFrames:
+    - {$ref: '#/components/schemas/SyncFrame'}
+    - {$ref: '#/components/schemas/Signal'}
+  serverFrames:
+    - {$ref: '#/components/schemas/Event'}
+    - {$ref: '#/components/schemas/Signal'}
+paths:
+  /auth/register:
+    post:
+      tags: [Auth]
+      operationId: register
+      security: []
+      summary: Самостоятельная регистрация, если разрешена администратором
+      description: Создаёт аккаунт, но не выдаёт токен; затем вызовите login.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Credentials'}
+      responses:
+        '201':
+          description: Созданный пользователь.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/User'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      security: []
+      summary: Вход по логину и паролю
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/Credentials'}
+      responses:
+        '200':
+          description: Токен и пользователь.
+          headers:
+            Cache-Control: {schema: {type: string}, example: no-store}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/LoginResult'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401':
+          description: Неверный логин или пароль.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+        '429': {$ref: '#/components/responses/RateLimited'}
+  /auth/me:
+    get:
+      tags: [Auth]
+      operationId: getCurrentUser
+      summary: Текущий пользователь
+      responses:
+        '200':
+          description: Пользователь.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/User'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      summary: Отозвать текущую сессию
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /auth/change-password:
+    post:
+      tags: [Auth]
+      operationId: changePassword
+      summary: Сменить пароль и отозвать все сессии пользователя
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ChangePassword'}
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401':
+          description: Сессия недействительна или текущий пароль неверен.
+  /auth/websocket-ticket:
+    post:
+      tags: [Events]
+      operationId: createWebSocketTicket
+      summary: Выдать одноразовый билет WebSocket
+      responses:
+        '201':
+          description: Билет на 30 секунд.
+          headers:
+            Cache-Control: {schema: {type: string}, example: no-store}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/WebSocketTicket'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /ws:
+    get:
+      tags: [Events]
+      operationId: connectWebSocket
+      security: []
+      summary: WebSocket upgrade с одноразовым билетом
+      description: |
+        Используйте wss:// на HTTPS-сервере. Только здесь билет передаётся в
+        query. Bearer-токен не отправляется в URL. После upgrade используйте
+        кадры, описанные в x-websocket-messages.
+      parameters:
+        - name: ticket
+          in: query
+          required: true
+          schema: {type: string}
+      responses:
+        '101': {description: Переключение протокола на WebSocket.}
+        '401':
+          description: Билет неверен, истёк или уже использован.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+  /users:
+    get:
+      tags: [Users]
+      operationId: searchUsers
+      summary: Найти активных пользователей по началу логина
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: {type: string, minLength: 2, maxLength: 32}
+      responses:
+        '200':
+          description: Не более 20 совпадений; текущий пользователь исключён.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [users]
+                properties:
+                  users:
+                    type: array
+                    items: {$ref: '#/components/schemas/UserSearchItem'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /chats/direct:
+    post:
+      tags: [Chats]
+      operationId: getOrCreateDirectChat
+      summary: Создать или получить личный чат
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UserIDInput'}
+      responses:
+        '200':
+          description: Чат уже существует.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Chat'}
+        '201':
+          description: Новый чат.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Chat'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /chats:
+    get:
+      tags: [Chats]
+      operationId: listChats
+      summary: Последние созданные чаты текущего пользователя
+      description: Пока доступен только limit; курсор списка чатов сервер не поддерживает.
+      parameters:
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: Список чатов.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [chats]
+                properties:
+                  chats:
+                    type: array
+                    items: {$ref: '#/components/schemas/Chat'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    post:
+      tags: [Chats]
+      operationId: createGroupChat
+      summary: Создать групповой чат
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/GroupInput'}
+      responses:
+        '201':
+          description: Созданная группа; автор — owner.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Chat'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /chats/{id}:
+    parameters:
+      - {$ref: '#/components/parameters/ChatID'}
+    get:
+      tags: [Chats]
+      operationId: getChat
+      summary: Получить чат, участником которого является пользователь
+      responses:
+        '200':
+          description: Чат.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Chat'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    delete:
+      tags: [Chats]
+      operationId: deleteGroupChat
+      summary: Удалить группу (только owner)
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /chats/{id}/members:
+    parameters:
+      - {$ref: '#/components/parameters/ChatID'}
+    get:
+      tags: [Chats]
+      operationId: listChatMembers
+      summary: Состав чата
+      responses:
+        '200':
+          description: Участники и роли.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [members]
+                properties:
+                  members:
+                    type: array
+                    items: {$ref: '#/components/schemas/Member'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    post:
+      tags: [Chats]
+      operationId: addGroupMember
+      summary: Добавить пользователя в группу (owner или admin)
+      description: Новый участник получает доступ к истории группы и отправленным файлам.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UserIDInput'}
+      responses:
+        '201':
+          description: Участник добавлен.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AddedMember'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /chats/{id}/members/{userID}:
+    delete:
+      tags: [Chats]
+      operationId: removeGroupMember
+      summary: Исключить участника из группы (owner или admin)
+      description: После удаления следующий запрос истории, файла или превью вернёт 404.
+      parameters:
+        - {$ref: '#/components/parameters/ChatID'}
+        - {$ref: '#/components/parameters/UserID'}
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /chats/{id}/leave:
+    post:
+      tags: [Chats]
+      operationId: leaveGroupChat
+      summary: Выйти из группы
+      description: Owner сначала передаёт владение или удаляет группу.
+      parameters:
+        - {$ref: '#/components/parameters/ChatID'}
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /chats/{id}/owner:
+    post:
+      tags: [Chats]
+      operationId: transferGroupOwnership
+      summary: Передать владение группой другому участнику
+      description: Предыдущий owner получает роль admin.
+      parameters:
+        - {$ref: '#/components/parameters/ChatID'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/UserIDInput'}
+      responses:
+        '200':
+          description: Идентификатор нового владельца.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/OwnerResult'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /chats/{id}/messages:
+    parameters:
+      - {$ref: '#/components/parameters/ChatID'}
+    get:
+      tags: [Messages]
+      operationId: listMessages
+      summary: История чата
+      description: |
+        Без курсора — последние сообщения по seq убыванию. before выбирает seq
+        строго меньше курсора по убыванию; after — строго больше по возрастанию.
+        before и after одновременно недопустимы. Если клиенту нужна более старая
+        страница, передайте seq последнего элемента предыдущей страницы как before.
+      parameters:
+        - name: before
+          in: query
+          schema: {type: integer, format: int64, minimum: 0}
+        - name: after
+          in: query
+          schema: {type: integer, format: int64, minimum: 0}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: Сообщения в порядке выбранного курсора.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [messages]
+                properties:
+                  messages:
+                    type: array
+                    items: {$ref: '#/components/schemas/Message'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+    post:
+      tags: [Messages]
+      operationId: sendMessage
+      summary: Отправить сообщение
+      description: |
+        client_message_id обеспечивает идемпотентность. Повтор с тем же текстом
+        и набором attachment_ids вернёт 200; с другим содержимым — 409.
+        Прикреплять можно только свои ранее загруженные файлы этого чата,
+        которые ещё не были прикреплены к сообщению.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/MessageInput'}
+      responses:
+        '200':
+          description: Идентичный повтор уже отправленного сообщения.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Message'}
+        '201':
+          description: Новое сообщение.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Message'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /chats/{id}/read:
+    post:
+      tags: [Messages]
+      operationId: markChatRead
+      summary: Сдвинуть указатель прочитанного сообщения
+      description: Указатель монотонен и не превышает последний seq чата.
+      parameters:
+        - {$ref: '#/components/parameters/ChatID'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ReadInput'}
+      responses:
+        '200':
+          description: Фактическая позиция чтения.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReadPosition'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /chats/{id}/search:
+    get:
+      tags: [Messages]
+      operationId: searchChatMessages
+      summary: Поиск по тексту и именам файлов в одном чате
+      description: Содержимое документов и OCR не индексируются.
+      parameters:
+        - {$ref: '#/components/parameters/ChatID'}
+        - name: q
+          in: query
+          required: true
+          schema: {type: string, minLength: 2, maxLength: 100}
+        - {$ref: '#/components/parameters/Limit'}
+      responses:
+        '200':
+          description: Совпадения по seq убыванию.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [messages]
+                properties:
+                  messages:
+                    type: array
+                    items: {$ref: '#/components/schemas/Message'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /chats/{id}/files:
+    post:
+      tags: [Files]
+      operationId: uploadChatFile
+      summary: Загрузить файл потоком в приватное хранилище
+      description: |
+        Тело — сырые байты, без multipart/form-data. Клиент должен указать
+        Content-Length > 0, X-File-Name и MIME в Content-Type. По умолчанию
+        лимит 250 МиБ на файл и 10 ГиБ суммарно на пользователя; конфигурация
+        сервера может их изменить. Полученный id передайте в attachment_ids
+        при отправке сообщения. Пока сообщение не отправлено, другой участник
+        чата не может скачать файл.
+      parameters:
+        - {$ref: '#/components/parameters/ChatID'}
+        - name: X-File-Name
+          in: header
+          required: true
+          description: Имя файла, до 255 байт.
+          schema: {type: string, minLength: 1, maxLength: 255}
+        - name: Content-Length
+          in: header
+          required: true
+          description: Точный размер тела в байтах; chunked без длины отклоняется.
+          schema: {type: integer, format: int64, minimum: 1}
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: {type: string, format: binary}
+          image/jpeg:
+            schema: {type: string, format: binary}
+          image/png:
+            schema: {type: string, format: binary}
+          video/mp4:
+            schema: {type: string, format: binary}
+        description: Можно передать любой MIME; перечислены лишь частые типы.
+      responses:
+        '201':
+          description: Загруженный файл и состояние превью.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Attachment'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '413': {$ref: '#/components/responses/TooLarge'}
+        '502': {$ref: '#/components/responses/Unavailable'}
+  /files/{id}:
+    get:
+      tags: [Files]
+      operationId: getFileMetadata
+      summary: Получить метаданные доступного файла
+      parameters:
+        - {$ref: '#/components/parameters/FileID'}
+      responses:
+        '200':
+          description: Метаданные, включая preview_state.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Attachment'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /files/{id}/content:
+    parameters:
+      - {$ref: '#/components/parameters/FileID'}
+      - {$ref: '#/components/parameters/Range'}
+    get:
+      tags: [Files]
+      operationId: downloadFile
+      summary: Скачать оригинал с проверкой Bearer и членства
+      description: |
+        Для видео делайте отдельные авторизованные Range-запросы. MIME ответа
+        равен content_type метаданных, а не всегда application/octet-stream.
+        Каждый запрос проверяет доступ заново; не используйте публичные URL
+        или нативный плеер, который не умеет передавать Authorization.
+      responses:
+        '200':
+          description: Полный файл.
+          headers:
+            Content-Length: {schema: {type: integer, format: int64}}
+            Content-Disposition: {schema: {type: string}}
+            Accept-Ranges: {schema: {type: string}, example: bytes}
+            Cache-Control: {schema: {type: string}, example: 'private, no-store'}
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        '206':
+          description: Один диапазон байтов.
+          headers:
+            Content-Length: {schema: {type: integer, format: int64}}
+            Content-Range: {schema: {type: string}, example: 'bytes 0-1023/4096'}
+            Accept-Ranges: {schema: {type: string}, example: bytes}
+            Cache-Control: {schema: {type: string}, example: 'private, no-store'}
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '416':
+          description: Неверный или выходящий за размер диапазон.
+          headers:
+            Content-Range: {schema: {type: string}, example: 'bytes */4096'}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Error'}
+    head:
+      tags: [Files]
+      operationId: headFile
+      summary: Проверить доступ и заголовки оригинала без тела
+      responses:
+        '200': {description: Заголовки полного файла, без тела.}
+        '206': {description: Заголовки диапазона, без тела.}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '416': {description: Неверный диапазон; Content-Range имеет вид bytes */size.}
+  /files/{id}/preview:
+    parameters:
+      - {$ref: '#/components/parameters/FileID'}
+      - {$ref: '#/components/parameters/Range'}
+    get:
+      tags: [Files]
+      operationId: downloadFilePreview
+      summary: Скачать JPEG-превью с проверкой Bearer и членства
+      description: Если preview_state ещё не ready либо превью не создано, возвращается 404.
+      responses:
+        '200':
+          description: Полное JPEG-превью.
+          headers:
+            Accept-Ranges: {schema: {type: string}, example: bytes}
+            Cache-Control: {schema: {type: string}, example: 'private, no-store'}
+          content:
+            image/jpeg:
+              schema: {type: string, format: binary}
+        '206':
+          description: Диапазон байтов JPEG-превью.
+          headers:
+            Content-Range: {schema: {type: string}}
+          content:
+            image/jpeg:
+              schema: {type: string, format: binary}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '416': {description: Неверный диапазон.}
+    head:
+      tags: [Files]
+      operationId: headFilePreview
+      summary: Проверить доступ и заголовки превью без тела
+      responses:
+        '200': {description: Заголовки полного JPEG-превью, без тела.}
+        '206': {description: Заголовки диапазона, без тела.}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '416': {description: Неверный диапазон.}
+  /chats/{id}/calls:
+    post:
+      tags: [Calls]
+      operationId: startCall
+      summary: Начать аудио- или видеозвонок в личном чате
+      description: В групповом чате звонки недоступны; у пользователя может быть только один активный звонок.
+      parameters:
+        - {$ref: '#/components/parameters/ChatID'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CallInput'}
+      responses:
+        '201':
+          description: Звонок ожидает ответа 45 секунд.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Call'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /calls/{id}:
+    get:
+      tags: [Calls]
+      operationId: getCall
+      summary: Получить состояние звонка
+      parameters:
+        - {$ref: '#/components/parameters/CallID'}
+      responses:
+        '200':
+          description: Звонок.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Call'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /calls/{id}/accept:
+    post:
+      tags: [Calls]
+      operationId: acceptCall
+      summary: Принять звонок на текущем устройстве вызываемого пользователя
+      description: Первое принявшее устройство выбирается для WebRTC; его повторный accept идемпотентен.
+      parameters:
+        - {$ref: '#/components/parameters/CallID'}
+      responses:
+        '200':
+          description: Звонок принят.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Call'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /calls/{id}/reject:
+    post:
+      tags: [Calls]
+      operationId: rejectCall
+      summary: Отклонить входящий звонок
+      parameters:
+        - {$ref: '#/components/parameters/CallID'}
+      responses:
+        '200':
+          description: Звонок отклонён.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Call'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /calls/{id}/cancel:
+    post:
+      tags: [Calls]
+      operationId: cancelCall
+      summary: Отменить исходящий звонок
+      parameters:
+        - {$ref: '#/components/parameters/CallID'}
+      responses:
+        '200':
+          description: Звонок отменён.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Call'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /calls/{id}/end:
+    post:
+      tags: [Calls]
+      operationId: endCall
+      summary: Завершить принятый звонок
+      parameters:
+        - {$ref: '#/components/parameters/CallID'}
+      responses:
+        '200':
+          description: Звонок завершён.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Call'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+  /calls/{id}/ice:
+    get:
+      tags: [Calls]
+      operationId: getCallIceConfig
+      summary: Получить временные TURN-реквизиты выбранного устройства
+      description: Доступно только после accept; срок реквизитов 10 минут. Секрет не сохраняйте в истории.
+      parameters:
+        - {$ref: '#/components/parameters/CallID'}
+      responses:
+        '200':
+          description: ICE-конфигурация.
+          headers:
+            Cache-Control: {schema: {type: string}, example: no-store}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/IceConfig'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/Unavailable'}
