@@ -9,11 +9,13 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"familychat/server/internal/auth"
 )
@@ -30,6 +32,28 @@ type fileMeta struct {
 	Available    bool   `json:"available"`
 	ObjectKey    string `json:"-"`
 	PreviewKey   string `json:"-"`
+}
+
+// X-File-Name* carries RFC 5987 UTF-8 percent encoding for clients whose HTTP
+// stacks reject non-ASCII header values. The original header remains supported.
+func uploadFilename(headers http.Header) (string, error) {
+	name := headers.Get("X-File-Name")
+	if encoded := headers.Get("X-File-Name*"); encoded != "" {
+		parts := strings.SplitN(encoded, "'", 3)
+		if len(encoded) > 1024 || len(parts) != 3 || !strings.EqualFold(parts[0], "UTF-8") {
+			return "", errors.New("invalid filename encoding")
+		}
+		var err error
+		name, err = url.PathUnescape(parts[2])
+		if err != nil {
+			return "", errors.New("invalid filename encoding")
+		}
+	}
+	name = filepath.Base(strings.TrimSpace(name))
+	if name == "" || name == "." || name == "/" || len(name) > 255 || !utf8.ValidString(name) || strings.ContainsAny(name, "\x00\r\n\\") {
+		return "", errors.New("invalid filename")
+	}
+	return name, nil
 }
 
 func maxAllowedFileBytes(d Dependencies) int64 {
@@ -74,8 +98,8 @@ func registerFiles(mux *http.ServeMux, d Dependencies) {
 			writeError(w, 413, "invalid_file_size")
 			return
 		}
-		filename := filepath.Base(strings.TrimSpace(r.Header.Get("X-File-Name")))
-		if filename == "" || filename == "." || filename == "/" || len(filename) > 255 || strings.ContainsAny(filename, "\x00\r\n\\") {
+		filename, nameErr := uploadFilename(r.Header)
+		if nameErr != nil {
 			writeError(w, 400, "invalid_filename")
 			return
 		}

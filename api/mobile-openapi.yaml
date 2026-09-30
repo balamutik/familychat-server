@@ -932,6 +932,11 @@ paths:
         чата не может скачать файл.
       parameters:
         - {$ref: '#/components/parameters/ChatID'}
+        - name: X-File-Name*
+          in: header
+          required: false
+          description: RFC 5987 UTF-8 filename (UTF-8'' followed by percent-encoded bytes); takes precedence over X-File-Name. Use for non-ASCII names on mobile.
+          schema: { type: string, maxLength: 1024 }
         - name: X-File-Name
           in: header
           required: true
