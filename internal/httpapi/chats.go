@@ -15,10 +15,11 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 func validUUID(id string) bool { return uuidPattern.MatchString(id) }
 
 type chatView struct {
-	ID    string `json:"id"`
-	Kind  string `json:"kind"`
-	Title string `json:"title"`
-	Role  string `json:"role,omitempty"`
+	ID        string `json:"id"`
+	Kind      string `json:"kind"`
+	Title     string `json:"title"`
+	Role      string `json:"role,omitempty"`
+	AvatarURL string `json:"avatar_url,omitempty"`
 }
 
 func registerChats(mux *http.ServeMux, d Dependencies) {
@@ -37,7 +38,8 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		}
 		var active bool
 		var peerLogin string
-		if err := d.DB.QueryRow(r.Context(), `SELECT NOT disabled,login FROM users WHERE id=$1`, body.UserID).Scan(&active, &peerLogin); err != nil || !active {
+		var peerHasAvatar bool
+		if err := d.DB.QueryRow(r.Context(), `SELECT NOT disabled,login,avatar_key IS NOT NULL FROM users WHERE id=$1`, body.UserID).Scan(&active, &peerLogin, &peerHasAvatar); err != nil || !active {
 			writeError(w, 404, "not_found")
 			return
 		}
@@ -77,7 +79,11 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		if created {
 			status = 201
 		}
-		writeJSON(w, status, chatView{ID: id, Kind: "direct", Title: peerLogin, Role: "member"})
+		v := chatView{ID: id, Kind: "direct", Title: peerLogin, Role: "member"}
+		if peerHasAvatar {
+			v.AvatarURL = avatarURL(body.UserID)
+		}
+		writeJSON(w, status, v)
 	})
 	protected("POST /api/v1/chats", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
@@ -115,7 +121,11 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 	})
 	protected("GET /api/v1/chats", func(w http.ResponseWriter, r *http.Request) {
 		p, _ := auth.PrincipalFrom(r.Context())
-		rows, err := d.DB.Query(r.Context(), `SELECT c.id::text,c.kind,CASE WHEN c.kind='direct' THEN (SELECT login FROM users u WHERE u.id=CASE WHEN c.direct_user_low=$1 THEN c.direct_user_high ELSE c.direct_user_low END) ELSE c.title END,m.role FROM chats c JOIN chat_members m ON m.chat_id=c.id WHERE m.user_id=$1 AND c.deleted_at IS NULL ORDER BY c.created_at DESC,c.id DESC LIMIT $2`, p.UserID, parseLimit(r))
+		rows, err := d.DB.Query(r.Context(), `SELECT c.id::text,c.kind,CASE WHEN c.kind='direct' THEN peer.login ELSE c.title END,m.role,
+			CASE WHEN peer.avatar_key IS NOT NULL AND NOT peer.disabled THEN '/api/v1/users/'||peer.id::text||'/avatar' ELSE '' END
+			FROM chats c JOIN chat_members m ON m.chat_id=c.id
+			LEFT JOIN users peer ON peer.id=CASE WHEN c.kind='direct' THEN CASE WHEN c.direct_user_low=$1 THEN c.direct_user_high ELSE c.direct_user_low END ELSE NULL END
+			WHERE m.user_id=$1 AND c.deleted_at IS NULL ORDER BY c.created_at DESC,c.id DESC LIMIT $2`, p.UserID, parseLimit(r))
 		if err != nil {
 			writeError(w, 500, "internal")
 			return
@@ -124,7 +134,7 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		list := []chatView{}
 		for rows.Next() {
 			var v chatView
-			if err := rows.Scan(&v.ID, &v.Kind, &v.Title, &v.Role); err != nil {
+			if err := rows.Scan(&v.ID, &v.Kind, &v.Title, &v.Role, &v.AvatarURL); err != nil {
 				writeError(w, 500, "internal")
 				return
 			}
@@ -144,7 +154,11 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		}
 		p, _ := auth.PrincipalFrom(r.Context())
 		var v chatView
-		err := d.DB.QueryRow(r.Context(), `SELECT c.id::text,c.kind,CASE WHEN c.kind='direct' THEN (SELECT login FROM users u WHERE u.id=CASE WHEN c.direct_user_low=$2 THEN c.direct_user_high ELSE c.direct_user_low END) ELSE c.title END,m.role FROM chats c JOIN chat_members m ON m.chat_id=c.id WHERE c.id=$1 AND m.user_id=$2 AND c.deleted_at IS NULL`, id, p.UserID).Scan(&v.ID, &v.Kind, &v.Title, &v.Role)
+		err := d.DB.QueryRow(r.Context(), `SELECT c.id::text,c.kind,CASE WHEN c.kind='direct' THEN peer.login ELSE c.title END,m.role,
+			CASE WHEN peer.avatar_key IS NOT NULL AND NOT peer.disabled THEN '/api/v1/users/'||peer.id::text||'/avatar' ELSE '' END
+			FROM chats c JOIN chat_members m ON m.chat_id=c.id
+			LEFT JOIN users peer ON peer.id=CASE WHEN c.kind='direct' THEN CASE WHEN c.direct_user_low=$2 THEN c.direct_user_high ELSE c.direct_user_low END ELSE NULL END
+			WHERE c.id=$1 AND m.user_id=$2 AND c.deleted_at IS NULL`, id, p.UserID).Scan(&v.ID, &v.Kind, &v.Title, &v.Role, &v.AvatarURL)
 		if err != nil {
 			writeError(w, 404, "not_found")
 			return
@@ -163,23 +177,28 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 			writeError(w, 404, "not_found")
 			return
 		}
-		rows, err := d.DB.Query(r.Context(), `SELECT u.id::text,u.login,cm.role FROM chat_members cm JOIN users u ON u.id=cm.user_id WHERE cm.chat_id=$1 ORDER BY u.login`, id)
+		rows, err := d.DB.Query(r.Context(), `SELECT u.id::text,u.login,cm.role,u.avatar_key IS NOT NULL AND NOT u.disabled FROM chat_members cm JOIN users u ON u.id=cm.user_id WHERE cm.chat_id=$1 ORDER BY u.login`, id)
 		if err != nil {
 			writeError(w, 500, "internal")
 			return
 		}
 		defer rows.Close()
 		type member struct {
-			ID    string `json:"id"`
-			Login string `json:"login"`
-			Role  string `json:"role"`
+			ID        string `json:"id"`
+			Login     string `json:"login"`
+			Role      string `json:"role"`
+			AvatarURL string `json:"avatar_url,omitempty"`
 		}
 		members := []member{}
 		for rows.Next() {
 			var m member
-			if err := rows.Scan(&m.ID, &m.Login, &m.Role); err != nil {
+			var hasAvatar bool
+			if err := rows.Scan(&m.ID, &m.Login, &m.Role, &hasAvatar); err != nil {
 				writeError(w, 500, "internal")
 				return
+			}
+			if hasAvatar {
+				m.AvatarURL = avatarURL(m.ID)
 			}
 			members = append(members, m)
 		}

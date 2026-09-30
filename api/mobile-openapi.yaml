@@ -4,14 +4,16 @@ info:
   version: 0.1.0
   description: |
     Контракт действующего Go-сервера для мобильных клиентов. Базовый путь — /api/v1.
-    Все операции, кроме регистрации, входа и WebSocket upgrade, требуют
+    Все операции, кроме регистрации, входа, чтения аватара и WebSocket upgrade, требуют
     Authorization: Bearer <token>. Самостоятельная регистрация доступна только
     когда её включил администратор; телефон, почта и приглашение не нужны.
 
     Вложения и превью всегда скачиваются через API с Bearer-заголовком.
     До отправки сообщения файл видит только загрузивший его участник чата;
     после отправки — текущие участники. Удаление участника или отзыв сессии
-    блокируют последующие запросы. Публичных и подписанных S3 URL нет.
+    блокируют последующие запросы. Аватар — отдельное изображение JPEG/PNG:
+    текущий аватар выдаётся через публичный GET /users/{userID}/avatar без
+    Bearer; это не открывает доступа к вложениям чата. Прямых S3 URL нет.
 
     OpenAPI описывает HTTP handshake WebSocket. Форматы кадров описаны ниже
     в x-websocket-messages; обычные генераторы HTTP-клиента их не создают.
@@ -77,12 +79,14 @@ components:
         id: {$ref: '#/components/schemas/UUID'}
         login: {type: string}
         role: {type: string, enum: [user, admin]}
+        avatar_url: {type: string, description: Относительный публичный URL текущего аватара; отсутствует, если аватар не задан.}
     UserSearchItem:
       type: object
       required: [id, login]
       properties:
         id: {$ref: '#/components/schemas/UUID'}
         login: {type: string}
+        avatar_url: {type: string, description: Относительный публичный URL, если аватар задан.}
     LoginResult:
       type: object
       required: [token, user]
@@ -108,6 +112,7 @@ components:
           type: string
           description: В личном чате это актуальный логин собеседника.
         role: {type: string, enum: [owner, admin, member]}
+        avatar_url: {type: string, description: Публичный аватар собеседника в личном чате; отсутствует для группы и профиля без аватара.}
     Member:
       type: object
       required: [id, login, role]
@@ -115,6 +120,12 @@ components:
         id: {$ref: '#/components/schemas/UUID'}
         login: {type: string}
         role: {type: string, enum: [owner, admin, member]}
+        avatar_url: {type: string, description: Относительный публичный URL, если аватар задан и пользователь активен.}
+    AvatarResult:
+      type: object
+      required: [avatar_url]
+      properties:
+        avatar_url: {type: string, description: Относительный публичный URL текущего аватара.}
     UserIDInput:
       type: object
       additionalProperties: false
@@ -527,6 +538,67 @@ paths:
                     items: {$ref: '#/components/schemas/UserSearchItem'}
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
+  /users/me/avatar:
+    put:
+      tags: [Users]
+      operationId: replaceOwnAvatar
+      summary: Загрузить или заменить свой аватар
+      description: |
+        Сырые байты JPEG или PNG, без multipart/form-data. Нужен Content-Length.
+        Сервер проверяет формат изображения и предел 4096×4096 пикселей.
+        Максимум — 5 МиБ или меньший лимит файла, установленный администратором;
+        размер текущего аватара входит в пользовательскую квоту.
+        Старое изображение после замены удаляется из S3 фоновым worker.
+      requestBody:
+        required: true
+        content:
+          image/jpeg:
+            schema: {type: string, format: binary}
+          image/png:
+            schema: {type: string, format: binary}
+      responses:
+        '200':
+          description: Аватар сохранён.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AvatarResult'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '413': {description: Изображение превышает лимит.}
+        '415': {description: Разрешены только image/jpeg и image/png.}
+    delete:
+      tags: [Users]
+      operationId: deleteOwnAvatar
+      summary: Удалить свой аватар
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /users/{userID}/avatar:
+    parameters:
+      - {$ref: '#/components/parameters/UserID'}
+    get:
+      tags: [Users]
+      operationId: getPublicAvatar
+      security: []
+      summary: Получить текущий аватар пользователя без авторизации
+      description: Выдаётся через API без перенаправления на S3; старое изображение после замены недоступно по этому URL.
+      responses:
+        '200':
+          description: JPEG или PNG.
+          content:
+            image/jpeg:
+              schema: {type: string, format: binary}
+            image/png:
+              schema: {type: string, format: binary}
+        '404': {$ref: '#/components/responses/NotFound'}
+    head:
+      tags: [Users]
+      operationId: headPublicAvatar
+      security: []
+      summary: Проверить наличие текущего аватара
+      responses:
+        '200': {description: Аватар есть; Content-Type и Content-Length соответствуют изображению.}
+        '404': {$ref: '#/components/responses/NotFound'}
   /chats/direct:
     post:
       tags: [Chats]

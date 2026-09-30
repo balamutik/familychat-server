@@ -224,7 +224,46 @@ func (w *Worker) cleanup(ctx context.Context) error {
 			break
 		}
 	}
+	for i := 0; i < 25; i++ {
+		removed, err := w.purgeAvatarGarbage(ctx)
+		if err != nil {
+			return err
+		}
+		if !removed {
+			break
+		}
+	}
 	return nil
+}
+
+func (w *Worker) purgeAvatarGarbage(ctx context.Context) (bool, error) {
+	tx, err := w.DB.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	var key string
+	err = tx.QueryRow(ctx, `SELECT gc.object_key FROM avatar_gc gc
+		WHERE NOT EXISTS(SELECT 1 FROM users u WHERE u.avatar_key=gc.object_key)
+		ORDER BY gc.created_at FOR UPDATE OF gc SKIP LOCKED LIMIT 1`).Scan(&key)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	deleteCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := w.Objects.Delete(deleteCtx, key); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM avatar_gc WHERE object_key=$1`, key); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (w *Worker) purgeExpired(ctx context.Context) (bool, error) {

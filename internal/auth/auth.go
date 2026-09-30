@@ -29,6 +29,7 @@ type Principal struct {
 	SessionID string `json:"-"`
 	Login     string `json:"login"`
 	Role      string `json:"role"`
+	AvatarURL string `json:"avatar_url,omitempty"`
 }
 
 type Service struct {
@@ -77,9 +78,10 @@ func (s *Service) Authenticate(ctx context.Context, token string) (Principal, er
 	}
 	h := sha256.Sum256([]byte(token))
 	var p Principal
-	err := s.DB.QueryRow(ctx, `SELECT u.id::text,s.id::text,u.login,u.role
+	err := s.DB.QueryRow(ctx, `SELECT u.id::text,s.id::text,u.login,u.role,
+		CASE WHEN u.avatar_key IS NULL THEN '' ELSE '/api/v1/users/'||u.id::text||'/avatar' END
 		FROM sessions s JOIN users u ON u.id=s.user_id
-		WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>now() AND NOT u.disabled`, h[:]).Scan(&p.UserID, &p.SessionID, &p.Login, &p.Role)
+		WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>now() AND NOT u.disabled`, h[:]).Scan(&p.UserID, &p.SessionID, &p.Login, &p.Role, &p.AvatarURL)
 	if err != nil {
 		return Principal{}, ErrUnauthenticated
 	}
@@ -166,7 +168,9 @@ func (s *Service) Login(ctx context.Context, login, password string) (string, Pr
 	}
 	var p Principal
 	var hash string
-	err = s.DB.QueryRow(ctx, `SELECT id::text,login,role,password_hash FROM users WHERE login=$1 AND NOT disabled`, login).Scan(&p.UserID, &p.Login, &p.Role, &hash)
+	err = s.DB.QueryRow(ctx, `SELECT id::text,login,role,password_hash,
+		CASE WHEN avatar_key IS NULL THEN '' ELSE '/api/v1/users/'||id::text||'/avatar' END
+		FROM users WHERE login=$1 AND NOT disabled`, login).Scan(&p.UserID, &p.Login, &p.Role, &hash, &p.AvatarURL)
 	if err != nil {
 		return "", Principal{}, ErrInvalidCredentials
 	}

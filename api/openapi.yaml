@@ -3,8 +3,9 @@ info:
   title: FamilyChat API
   version: 0.1.0
   description: |
-    All chat, call and file operations require an opaque Bearer session token.
-    File bytes are served only by this API after a current chat membership check.
+    All chat, call and private file operations require an opaque Bearer session token.
+    Chat file bytes are served only by this API after a current chat membership check.
+    Current JPEG/PNG user avatars are the sole public file exception and are streamed by the API without exposing S3.
     WebSocket upgrade uses a single-use ticket rather than the Bearer token in the URL.
 servers:
   - url: /api/v1
@@ -34,6 +35,7 @@ components:
         id: {$ref: '#/components/schemas/UUID'}
         login: {type: string}
         role: {type: string, enum: [admin, user]}
+        avatar_url: {type: string, description: Optional relative public URL.}
     MessageInput:
       type: object
       required: [client_message_id]
@@ -127,6 +129,30 @@ paths:
     post:
       summary: Issue a 30-second, single-use WebSocket ticket
       responses: {'201': {description: Ticket}}
+  /users/me/avatar:
+    put:
+      summary: Replace own avatar with validated JPEG or PNG bytes
+      description: Raw body with Content-Length; limit is min(5 MiB, configured max_file_bytes, server ceiling). The current avatar persists until replaced or deleted.
+      requestBody:
+        required: true
+        content:
+          image/jpeg: {schema: {type: string, format: binary}}
+          image/png: {schema: {type: string, format: binary}}
+      responses: {'200': {description: 'avatar_url'}, '400': {description: Invalid image}, '413': {description: Too large}, '415': {description: Unsupported type}}
+    delete:
+      summary: Remove own avatar
+      responses: {'204': {description: Removed}}
+  /users/{userID}/avatar:
+    get:
+      security: []
+      summary: Public current avatar streamed by the API
+      parameters: [{$ref: '#/components/parameters/MemberID'}]
+      responses: {'200': {description: JPEG or PNG}, '404': {description: No avatar}}
+    head:
+      security: []
+      summary: Check public avatar metadata
+      parameters: [{$ref: '#/components/parameters/MemberID'}]
+      responses: {'200': {description: Content-Type and Content-Length}, '404': {description: No avatar}}
   /ws:
     get:
       security: []

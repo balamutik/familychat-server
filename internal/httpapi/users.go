@@ -15,22 +15,27 @@ func registerUsers(mux *http.ServeMux, d Dependencies) {
 			return
 		}
 		p, _ := auth.PrincipalFrom(r.Context())
-		rows, err := d.DB.Query(r.Context(), `SELECT id::text,login FROM users WHERE NOT disabled AND id<>$1 AND login LIKE $2||'%' ORDER BY login LIMIT 20`, p.UserID, query)
+		rows, err := d.DB.Query(r.Context(), `SELECT id::text,login,avatar_key IS NOT NULL FROM users WHERE NOT disabled AND id<>$1 AND login LIKE $2||'%' ORDER BY login LIMIT 20`, p.UserID, query)
 		if err != nil {
 			writeError(w, 500, "internal")
 			return
 		}
 		defer rows.Close()
 		type user struct {
-			ID    string `json:"id"`
-			Login string `json:"login"`
+			ID        string `json:"id"`
+			Login     string `json:"login"`
+			AvatarURL string `json:"avatar_url,omitempty"`
 		}
 		users := []user{}
 		for rows.Next() {
 			var u user
-			if err := rows.Scan(&u.ID, &u.Login); err != nil {
+			var hasAvatar bool
+			if err := rows.Scan(&u.ID, &u.Login, &hasAvatar); err != nil {
 				writeError(w, 500, "internal")
 				return
+			}
+			if hasAvatar {
+				u.AvatarURL = avatarURL(u.ID)
 			}
 			users = append(users, u)
 		}

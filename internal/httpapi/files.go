@@ -108,7 +108,9 @@ func registerFiles(mux *http.ServeMux, d Dependencies) {
 			return
 		}
 		var used int64
-		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((SELECT sum(size_bytes) FROM attachments WHERE uploader_id=$1 AND purged_at IS NULL),0)+COALESCE((SELECT sum(reserved_bytes) FROM upload_reservations WHERE user_id=$1 AND state='uploading' AND expires_at>now()),0)`, p.UserID).Scan(&used); err != nil {
+		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((SELECT sum(size_bytes) FROM attachments WHERE uploader_id=$1 AND purged_at IS NULL),0)
+			+COALESCE((SELECT avatar_size_bytes FROM users WHERE id=$1),0)
+			+COALESCE((SELECT sum(reserved_bytes) FROM upload_reservations WHERE user_id=$1 AND state='uploading' AND expires_at>now()),0)`, p.UserID).Scan(&used); err != nil {
 			writeError(w, 500, "internal")
 			return
 		}

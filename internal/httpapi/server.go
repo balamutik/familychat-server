@@ -54,6 +54,7 @@ func New(deps Dependencies) http.Handler {
 	registerAuth(mux, deps)
 	registerChats(mux, deps)
 	registerUsers(mux, deps)
+	registerAvatars(mux, deps)
 	registerMessages(mux, deps)
 	registerFiles(mux, deps)
 	registerWebsocket(mux, deps)
