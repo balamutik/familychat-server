@@ -21,6 +21,38 @@ func adminOnly(d Dependencies, next http.HandlerFunc) http.Handler {
 }
 
 func registerAdmin(mux *http.ServeMux, d Dependencies) {
+	mux.Handle("GET /api/v1/admin/settings/storage", adminOnly(d, func(w http.ResponseWriter, r *http.Request) {
+		var retentionDays int
+		var maxFileBytes int64
+		if err := d.DB.QueryRow(r.Context(), `SELECT retention_days,max_file_bytes FROM settings WHERE singleton=true`).Scan(&retentionDays, &maxFileBytes); err != nil {
+			writeError(w, 500, "internal")
+			return
+		}
+		limit := maxAllowedFileBytes(d)
+		if maxFileBytes > limit {
+			maxFileBytes = limit
+		}
+		writeJSON(w, 200, map[string]any{"retention_days": retentionDays, "max_file_bytes": maxFileBytes, "max_allowed_bytes": limit})
+	}))
+	mux.Handle("PATCH /api/v1/admin/settings/storage", adminOnly(d, func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			RetentionDays *int   `json:"retention_days"`
+			MaxFileBytes  *int64 `json:"max_file_bytes"`
+		}
+		if !decodeJSON(w, r, &body) {
+			return
+		}
+		limit := maxAllowedFileBytes(d)
+		if body.RetentionDays == nil || *body.RetentionDays < 0 || *body.RetentionDays > 3650 || body.MaxFileBytes == nil || *body.MaxFileBytes < 1<<20 || *body.MaxFileBytes > limit || *body.MaxFileBytes%(1<<20) != 0 {
+			writeError(w, 400, "invalid_setting")
+			return
+		}
+		if _, err := d.DB.Exec(r.Context(), `UPDATE settings SET retention_days=$1,max_file_bytes=$2 WHERE singleton=true`, *body.RetentionDays, *body.MaxFileBytes); err != nil {
+			writeError(w, 500, "internal")
+			return
+		}
+		writeJSON(w, 200, map[string]any{"retention_days": *body.RetentionDays, "max_file_bytes": *body.MaxFileBytes, "max_allowed_bytes": limit})
+	}))
 	mux.Handle("GET /api/v1/admin/settings/registration", adminOnly(d, func(w http.ResponseWriter, r *http.Request) {
 		var enabled bool
 		if err := d.DB.QueryRow(r.Context(), `SELECT registration_enabled FROM settings WHERE singleton=true`).Scan(&enabled); err != nil {

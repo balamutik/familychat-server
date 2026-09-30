@@ -17,3 +17,11 @@ func TestConfigRejectsMissingSecrets(t *testing.T) {
 		t.Fatalf("Load() error = %v, want missing DATABASE_URL", err)
 	}
 }
+
+func TestConfigRejectsServerFileLimitBelowAdminMinimum(t *testing.T) {
+	t.Setenv("MAX_FILE_BYTES", "524288")
+	_, err := Load()
+	if err == nil || !strings.Contains(err.Error(), "MAX_FILE_BYTES must be at least") {
+		t.Fatalf("Load() error = %v, want minimum file size", err)
+	}
+}

@@ -15,14 +15,29 @@ import (
 )
 
 type messageView struct {
-	ID              string     `json:"id"`
-	ChatID          string     `json:"chat_id"`
-	Seq             int64      `json:"seq"`
-	SenderID        string     `json:"sender_id"`
-	ClientMessageID string     `json:"client_message_id"`
-	Text            string     `json:"text"`
-	CreatedAt       string     `json:"created_at"`
-	Attachments     []fileMeta `json:"attachments"`
+	ID              string        `json:"id"`
+	ChatID          string        `json:"chat_id"`
+	Seq             int64         `json:"seq"`
+	SenderID        string        `json:"sender_id"`
+	ClientMessageID string        `json:"client_message_id"`
+	Text            string        `json:"text"`
+	CreatedAt       string        `json:"created_at"`
+	Attachments     []fileMeta    `json:"attachments"`
+	Receipts        []receiptView `json:"receipts"`
+	Delivery        deliveryView  `json:"delivery"`
+}
+
+type receiptView struct {
+	UserID    string `json:"user_id"`
+	Delivered bool   `json:"delivered"`
+	Read      bool   `json:"read"`
+}
+
+type deliveryView struct {
+	RecipientCount int    `json:"recipient_count"`
+	DeliveredCount int    `json:"delivered_count"`
+	ReadCount      int    `json:"read_count"`
+	Status         string `json:"status"`
 }
 
 func registerMessages(mux *http.ServeMux, d Dependencies) {
@@ -113,7 +128,9 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 				}
 				seen[id] = true
 				var valid bool
-				err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM attachments a WHERE a.id=$1 AND a.chat_id=$2 AND a.uploader_id=$3 AND NOT EXISTS(SELECT 1 FROM message_attachments ma WHERE ma.attachment_id=a.id))`, id, chatID, p.UserID).Scan(&valid)
+				err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM attachments a CROSS JOIN settings s WHERE a.id=$1 AND a.chat_id=$2 AND a.uploader_id=$3
+					AND a.purged_at IS NULL AND (s.retention_days=0 OR a.created_at>now()-s.retention_days*interval '1 day')
+					AND NOT EXISTS(SELECT 1 FROM message_attachments ma WHERE ma.attachment_id=a.id))`, id, chatID, p.UserID).Scan(&valid)
 				if err != nil || !valid {
 					writeError(w, 404, "attachment_not_found")
 					return
@@ -225,40 +242,8 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 		}
 		writeJSON(w, 200, map[string]any{"messages": messages})
 	})
-	protected("POST /api/v1/chats/{id}/read", func(w http.ResponseWriter, r *http.Request) {
-		var body struct {
-			Seq int64 `json:"seq"`
-		}
-		if !decodeJSON(w, r, &body) {
-			return
-		}
-		if body.Seq < 0 {
-			writeError(w, 400, "invalid_seq")
-			return
-		}
-		p, _ := auth.PrincipalFrom(r.Context())
-		id := r.PathValue("id")
-		tx, err := d.DB.Begin(r.Context())
-		if err != nil {
-			writeError(w, 500, "internal")
-			return
-		}
-		defer tx.Rollback(r.Context())
-		if _, _, err = chatRole(r, tx, id, p.UserID); err != nil {
-			writeError(w, 404, "not_found")
-			return
-		}
-		var readSeq int64
-		if err = tx.QueryRow(r.Context(), `UPDATE chat_members SET read_seq=GREATEST(read_seq,LEAST($3,(SELECT next_seq-1 FROM chats WHERE id=$1))) WHERE chat_id=$1 AND user_id=$2 RETURNING read_seq`, id, p.UserID, body.Seq).Scan(&readSeq); err != nil {
-			writeError(w, 500, "internal")
-			return
-		}
-		if err = tx.Commit(r.Context()); err != nil {
-			writeError(w, 500, "internal")
-			return
-		}
-		writeJSON(w, 200, map[string]int64{"read_seq": readSeq})
-	})
+	protected("POST /api/v1/chats/{id}/delivered", func(w http.ResponseWriter, r *http.Request) { markReceipt(w, r, d, false) })
+	protected("POST /api/v1/chats/{id}/read", func(w http.ResponseWriter, r *http.Request) { markReceipt(w, r, d, true) })
 	protected("GET /api/v1/chats/{id}/search", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
 		if !validUUID(id) {
@@ -309,6 +294,54 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 	})
 }
 
+func markReceipt(w http.ResponseWriter, r *http.Request, d Dependencies, read bool) {
+	var body struct {
+		Seq int64 `json:"seq"`
+	}
+	if !decodeJSON(w, r, &body) {
+		return
+	}
+	if body.Seq < 0 {
+		writeError(w, 400, "invalid_seq")
+		return
+	}
+	p, _ := auth.PrincipalFrom(r.Context())
+	id := r.PathValue("id")
+	tx, err := d.DB.Begin(r.Context())
+	if err != nil {
+		writeError(w, 500, "internal")
+		return
+	}
+	defer tx.Rollback(r.Context())
+	if _, _, err = chatRole(r, tx, id, p.UserID); err != nil {
+		writeError(w, 404, "not_found")
+		return
+	}
+	var oldDelivered, oldRead, deliveredSeq, readSeq int64
+	if err = tx.QueryRow(r.Context(), `SELECT delivered_seq,read_seq FROM chat_members WHERE chat_id=$1 AND user_id=$2`, id, p.UserID).Scan(&oldDelivered, &oldRead); err != nil {
+		writeError(w, 500, "internal")
+		return
+	}
+	if err = tx.QueryRow(r.Context(), `UPDATE chat_members SET
+			delivered_seq=GREATEST(delivered_seq,LEAST($3,(SELECT next_seq-1 FROM chats WHERE id=$1))),
+			read_seq=CASE WHEN $4 THEN GREATEST(read_seq,LEAST($3,(SELECT next_seq-1 FROM chats WHERE id=$1))) ELSE read_seq END
+			WHERE chat_id=$1 AND user_id=$2 RETURNING delivered_seq,read_seq`, id, p.UserID, body.Seq, read).Scan(&deliveredSeq, &readSeq); err != nil {
+		writeError(w, 500, "internal")
+		return
+	}
+	if deliveredSeq != oldDelivered || readSeq != oldRead {
+		if _, err = tx.Exec(r.Context(), `INSERT INTO events(chat_id,kind,payload) VALUES($1,'receipt',jsonb_build_object('user_id',$2::text,'delivered_seq',$3::bigint,'read_seq',$4::bigint))`, id, p.UserID, deliveredSeq, readSeq); err != nil {
+			writeError(w, 500, "internal")
+			return
+		}
+	}
+	if err = tx.Commit(r.Context()); err != nil {
+		writeError(w, 500, "internal")
+		return
+	}
+	writeJSON(w, 200, map[string]int64{"delivered_seq": deliveredSeq, "read_seq": readSeq})
+}
+
 func attachMetadataList(ctx context.Context, db *pgxpool.Pool, messages []messageView) error {
 	refs := make([]*messageView, 0, len(messages))
 	for i := range messages {
@@ -328,8 +361,9 @@ func attachMetadata(ctx context.Context, db *pgxpool.Pool, messages []*messageVi
 		ids = append(ids, v.ID)
 		byID[v.ID] = v
 	}
-	rows, err := db.Query(ctx, `SELECT ma.message_id::text,a.id::text,a.chat_id::text,a.filename,a.content_type,a.size_bytes,a.preview_state
-		FROM message_attachments ma JOIN attachments a ON a.id=ma.attachment_id
+	rows, err := db.Query(ctx, `SELECT ma.message_id::text,a.id::text,a.chat_id::text,a.filename,a.content_type,a.size_bytes,a.preview_state,
+		(a.purged_at IS NULL AND (s.retention_days=0 OR a.created_at>now()-s.retention_days*interval '1 day'))
+		FROM message_attachments ma JOIN attachments a ON a.id=ma.attachment_id CROSS JOIN settings s
 		WHERE ma.message_id=ANY($1::uuid[]) ORDER BY ma.message_id,a.id`, ids)
 	if err != nil {
 		return err
@@ -338,12 +372,54 @@ func attachMetadata(ctx context.Context, db *pgxpool.Pool, messages []*messageVi
 	for rows.Next() {
 		var messageID string
 		var a fileMeta
-		if err := rows.Scan(&messageID, &a.ID, &a.ChatID, &a.Filename, &a.ContentType, &a.Size, &a.PreviewState); err != nil {
+		if err := rows.Scan(&messageID, &a.ID, &a.ChatID, &a.Filename, &a.ContentType, &a.Size, &a.PreviewState, &a.Available); err != nil {
 			return err
 		}
 		if v := byID[messageID]; v != nil {
 			v.Attachments = append(v.Attachments, a)
 		}
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	rows.Close()
+	for _, v := range messages {
+		v.Receipts = []receiptView{}
+		v.Delivery = deliveryView{Status: "sent"}
+	}
+	receipts, err := db.Query(ctx, `SELECT m.id::text,cm.user_id::text,cm.delivered_seq>=m.seq,cm.read_seq>=m.seq
+		FROM messages m JOIN chat_members cm ON cm.chat_id=m.chat_id AND cm.user_id<>m.sender_id AND cm.joined_at<=m.created_at
+		WHERE m.id=ANY($1::uuid[]) ORDER BY m.id,cm.user_id`, ids)
+	if err != nil {
+		return err
+	}
+	defer receipts.Close()
+	for receipts.Next() {
+		var messageID string
+		var receipt receiptView
+		if err := receipts.Scan(&messageID, &receipt.UserID, &receipt.Delivered, &receipt.Read); err != nil {
+			return err
+		}
+		if v := byID[messageID]; v != nil {
+			v.Receipts = append(v.Receipts, receipt)
+			v.Delivery.RecipientCount++
+			if receipt.Delivered {
+				v.Delivery.DeliveredCount++
+			}
+			if receipt.Read {
+				v.Delivery.ReadCount++
+			}
+		}
+	}
+	if err := receipts.Err(); err != nil {
+		return err
+	}
+	for _, v := range messages {
+		if v.Delivery.RecipientCount > 0 && v.Delivery.ReadCount == v.Delivery.RecipientCount {
+			v.Delivery.Status = "read"
+		} else if v.Delivery.RecipientCount > 0 && v.Delivery.DeliveredCount == v.Delivery.RecipientCount {
+			v.Delivery.Status = "delivered"
+		}
+	}
+	return nil
 }

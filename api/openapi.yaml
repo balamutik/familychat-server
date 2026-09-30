@@ -153,6 +153,24 @@ paths:
               properties:
                 enabled: {type: boolean}
       responses: {'200': {description: Setting}}
+  /admin/settings/storage:
+    get:
+      summary: Read retention days, effective maximum file size and server ceiling (admin)
+      responses: {'200': {description: 'retention_days, max_file_bytes, max_allowed_bytes'}}
+    patch:
+      summary: Set retention for all files and maximum size for new uploads (admin)
+      description: Zero retention days means unlimited. Shortening retention immediately denies old files; worker removes them from S3.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [retention_days, max_file_bytes]
+              properties:
+                retention_days: {type: integer, minimum: 0, maximum: 3650}
+                max_file_bytes: {type: integer, format: int64, minimum: 1048576, multipleOf: 1048576}
+      responses: {'200': {description: Saved storage policy}, '400': {description: Invalid setting or above server ceiling}}
   /admin/users:
     get:
       summary: Paginated account list (admin)
@@ -285,7 +303,7 @@ paths:
       responses: {'201': {description: Created}, '200': {description: Identical retry}, '409': {description: Conflicting retry}}
   /chats/{id}/read:
     post:
-      summary: Mark a sequence read
+      summary: Mark a sequence read; also confirms delivery
       parameters: [{$ref: '#/components/parameters/ChatID'}]
       requestBody:
         required: true
@@ -296,7 +314,22 @@ paths:
               required: [seq]
               properties:
                 seq: {type: integer, minimum: 0}
-      responses: {'200': {description: Read position}}
+      responses: {'200': {description: 'delivered_seq and read_seq'}}
+  /chats/{id}/delivered:
+    post:
+      summary: Acknowledge receipt of messages through a sequence
+      description: Monotonic and clamped to the latest chat sequence. Emits a membership-filtered receipt event when changed.
+      parameters: [{$ref: '#/components/parameters/ChatID'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [seq]
+              properties:
+                seq: {type: integer, format: int64, minimum: 0}
+      responses: {'200': {description: 'delivered_seq and read_seq'}}
   /chats/{id}/search:
     get:
       summary: Search text and attachment filenames within this chat

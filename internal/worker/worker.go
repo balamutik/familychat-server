@@ -61,8 +61,9 @@ func (w *Worker) Once(ctx context.Context) error {
 	defer tx.Rollback(ctx)
 	var j job
 	err = tx.QueryRow(ctx, `SELECT j.id::text,j.attachment_id::text,a.chat_id::text,a.object_key,a.content_type,j.attempts
-		FROM preview_jobs j JOIN attachments a ON a.id=j.attachment_id
-		WHERE (j.state='pending' AND (j.lease_until IS NULL OR j.lease_until<now())) OR (j.state='processing' AND j.lease_until<now())
+		FROM preview_jobs j JOIN attachments a ON a.id=j.attachment_id CROSS JOIN settings s
+		WHERE a.purged_at IS NULL AND (s.retention_days=0 OR a.created_at>now()-s.retention_days*interval '1 day')
+		AND ((j.state='pending' AND (j.lease_until IS NULL OR j.lease_until<now())) OR (j.state='processing' AND j.lease_until<now()))
 		ORDER BY j.created_at FOR UPDATE OF j SKIP LOCKED LIMIT 1`).Scan(&j.ID, &j.AttachmentID, &j.ChatID, &j.ObjectKey, &j.ContentType, &j.Attempts)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil
@@ -94,6 +95,18 @@ func (w *Worker) Once(ctx context.Context) error {
 		return err
 	}
 	defer final.Rollback(ctx)
+	var expired bool
+	if err = final.QueryRow(ctx, `SELECT a.purged_at IS NOT NULL OR (s.retention_days>0 AND a.created_at<=now()-s.retention_days*interval '1 day') FROM attachments a CROSS JOIN settings s WHERE a.id=$1 FOR UPDATE OF a`, j.AttachmentID).Scan(&expired); err != nil {
+		return err
+	}
+	if expired {
+		if key != "" {
+			if err = w.Objects.Delete(ctx, key); err != nil {
+				return err
+			}
+		}
+		state, key = "failed", ""
+	}
 	if _, err = final.Exec(ctx, `UPDATE preview_jobs SET state=$2,lease_until=NULL WHERE id=$1`, j.ID, state); err != nil {
 		return err
 	}
@@ -107,8 +120,10 @@ func (w *Worker) Once(ctx context.Context) error {
 			return err
 		}
 	}
-	if state == "ready" || state == "failed" || state == "unsupported" {
-		if _, err = final.Exec(ctx, `INSERT INTO events(chat_id,kind,payload) VALUES($1,'preview',jsonb_build_object('attachment_id',$2::text,'state',$3::text))`, j.ChatID, j.AttachmentID, state); err != nil {
+	if !expired && (state == "ready" || state == "failed" || state == "unsupported") {
+		if _, err = final.Exec(ctx, `INSERT INTO events(chat_id,kind,payload)
+			SELECT $1,'preview',jsonb_build_object('attachment_id',$2::text,'state',$3::text)
+			WHERE EXISTS(SELECT 1 FROM message_attachments WHERE attachment_id=$2::uuid)`, j.ChatID, j.AttachmentID, state); err != nil {
 			return err
 		}
 	}
@@ -200,5 +215,65 @@ func (w *Worker) cleanup(ctx context.Context) error {
 			return err
 		}
 	}
+	for i := 0; i < 25; i++ {
+		purged, err := w.purgeExpired(ctx)
+		if err != nil {
+			return err
+		}
+		if !purged {
+			break
+		}
+	}
 	return nil
+}
+
+func (w *Worker) purgeExpired(ctx context.Context) (bool, error) {
+	tx, err := w.DB.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	var retentionDays int
+	// Hold this policy during deletion so a concurrent admin change cannot rescue a selected file.
+	if err = tx.QueryRow(ctx, `SELECT retention_days FROM settings WHERE singleton=true FOR SHARE`).Scan(&retentionDays); err != nil {
+		return false, err
+	}
+	if retentionDays == 0 {
+		return false, nil
+	}
+	var id, chatID, objectKey, previewKey string
+	err = tx.QueryRow(ctx, `SELECT id::text,chat_id::text,object_key,COALESCE(preview_key,'') FROM attachments
+		WHERE purged_at IS NULL AND created_at<=now()-$1::integer*interval '1 day'
+		ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1`, retentionDays).Scan(&id, &chatID, &objectKey, &previewKey)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	deleteCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err = w.Objects.Delete(deleteCtx, objectKey); err != nil {
+		return false, err
+	}
+	if previewKey != "" {
+		if err = w.Objects.Delete(deleteCtx, previewKey); err != nil {
+			return false, err
+		}
+	}
+	if _, err = tx.Exec(ctx, `UPDATE attachments SET purged_at=now() WHERE id=$1`, id); err != nil {
+		return false, err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE preview_jobs SET state='failed',lease_until=NULL WHERE attachment_id=$1 AND state IN ('pending','processing')`, id); err != nil {
+		return false, err
+	}
+	if _, err = tx.Exec(ctx, `INSERT INTO events(chat_id,kind,payload)
+		SELECT $1,'file_expired',jsonb_build_object('attachment_id',$2::text)
+		WHERE EXISTS(SELECT 1 FROM message_attachments WHERE attachment_id=$2::uuid)`, chatID, id); err != nil {
+		return false, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	return true, nil
 }

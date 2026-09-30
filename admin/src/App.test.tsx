@@ -11,6 +11,7 @@ it('logs in as administrator, manages registration and blocks a user',async()=>{
   const user={id:'00000000-0000-4000-8000-000000000001',login:'mother',role:'admin',disabled:false,created_at:''}
   const member={id:'00000000-0000-4000-8000-000000000002',login:'member',role:'user',disabled:false,created_at:''}
   const calls:{path:string,method:string,authorization:string}[]=[]
+  let savedStorage={retention_days:0,max_file_bytes:250*1024*1024,max_allowed_bytes:250*1024*1024}
   vi.stubGlobal('fetch',vi.fn(async(path:string,init:RequestInit)=>{
     const method=init.method||'GET',authorization=new Headers(init.headers).get('Authorization')||''
     calls.push({path,method,authorization})
@@ -18,6 +19,8 @@ it('logs in as administrator, manages registration and blocks a user',async()=>{
     if(path.startsWith('/api/v1/admin/users?'))return response({users:[user,member],next_cursor:''})
     if(path==='/api/v1/admin/settings/registration'&&method==='GET')return response({enabled:false})
     if(path==='/api/v1/admin/settings/registration'&&method==='PATCH')return response({enabled:true})
+    if(path==='/api/v1/admin/settings/storage'&&method==='GET')return response(savedStorage)
+    if(path==='/api/v1/admin/settings/storage'&&method==='PATCH'){savedStorage={...savedStorage,...JSON.parse(String(init.body))};return response(savedStorage)}
     if(path.endsWith('/admin/users/'+member.id)&&method==='PATCH')return response({id:member.id,disabled:true})
     return response({error:'unexpected'},500)
   }))
@@ -28,6 +31,12 @@ it('logs in as administrator, manages registration and blocks a user',async()=>{
   await screen.findByRole('heading',{name:'Доступ к чату'})
   await screen.findByText('member')
   expect(calls.find(c=>c.path.includes('/admin/users?'))?.authorization).toBe('Bearer test-token')
+  fireEvent.change(screen.getByRole('spinbutton',{name:/Хранить файл, дней/}),{target:{value:'30'}})
+  fireEvent.change(screen.getByRole('spinbutton',{name:/Максимальный размер файла/}),{target:{value:'50'}})
+  fireEvent.click(screen.getByRole('button',{name:'Сохранить настройки'}))
+  await screen.findByText('Параметры хранения сохранены')
+  expect(savedStorage).toEqual({retention_days:30,max_file_bytes:50*1024*1024,max_allowed_bytes:250*1024*1024})
+  expect(calls.find(c=>c.path==='/api/v1/admin/settings/storage'&&c.method==='PATCH')?.authorization).toBe('Bearer test-token')
   fireEvent.click(screen.getByRole('switch',{name:'Самостоятельная регистрация'}))
   await waitFor(()=>expect(screen.getByRole('switch').getAttribute('aria-checked')).toBe('true'))
   fireEvent.click(screen.getAllByRole('button',{name:'Заблокировать'}).find(el=>!(el as HTMLButtonElement).disabled)!)
@@ -52,6 +61,7 @@ it('ignores a late list response after logout',async()=>{
     if(path==='/api/v1/auth/login')return response({token:'test-token',user})
     if(path.startsWith('/api/v1/admin/users?'))return await list
     if(path==='/api/v1/admin/settings/registration')return response({enabled:false})
+    if(path==='/api/v1/admin/settings/storage')return response({retention_days:0,max_file_bytes:250*1024*1024,max_allowed_bytes:250*1024*1024})
     return response(undefined,204)
   }))
   render(<App/>)

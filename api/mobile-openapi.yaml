@@ -140,7 +140,7 @@ components:
         owner_id: {$ref: '#/components/schemas/UUID'}
     Attachment:
       type: object
-      required: [id, chat_id, filename, content_type, size, preview_state]
+      required: [id, chat_id, filename, content_type, size, preview_state, available]
       description: |
         Здесь нет готового URL: сформируйте /files/{id}/content и /files/{id}/preview
         относительно /api/v1. Preview доступен только при preview_state=ready.
@@ -153,6 +153,9 @@ components:
         preview_state:
           type: string
           enum: [pending, processing, ready, failed, unsupported]
+        available:
+          type: boolean
+          description: false после истечения срока хранения или удаления объекта; метаданные остаются в истории.
     MessageInput:
       type: object
       additionalProperties: false
@@ -169,7 +172,7 @@ components:
           items: {$ref: '#/components/schemas/UUID'}
     Message:
       type: object
-      required: [id, chat_id, seq, sender_id, client_message_id, text, created_at, attachments]
+      required: [id, chat_id, seq, sender_id, client_message_id, text, created_at, attachments, receipts, delivery]
       properties:
         id: {$ref: '#/components/schemas/UUID'}
         chat_id: {$ref: '#/components/schemas/UUID'}
@@ -183,6 +186,29 @@ components:
         attachments:
           type: array
           items: {$ref: '#/components/schemas/Attachment'}
+        receipts:
+          type: array
+          description: Подтверждения текущих участников, вступивших в чат до отправки сообщения, кроме отправителя.
+          items: {$ref: '#/components/schemas/Receipt'}
+        delivery: {$ref: '#/components/schemas/Delivery'}
+    Receipt:
+      type: object
+      required: [user_id, delivered, read]
+      properties:
+        user_id: {$ref: '#/components/schemas/UUID'}
+        delivered: {type: boolean}
+        read: {type: boolean}
+    Delivery:
+      type: object
+      required: [recipient_count, delivered_count, read_count, status]
+      properties:
+        recipient_count: {type: integer, minimum: 0}
+        delivered_count: {type: integer, minimum: 0}
+        read_count: {type: integer, minimum: 0}
+        status:
+          type: string
+          enum: [sent, delivered, read]
+          description: delivered/read только когда все текущие получатели, вступившие до отправки, подтвердили; частичные подтверждения видны в счётчиках.
     ReadInput:
       type: object
       additionalProperties: false
@@ -191,8 +217,9 @@ components:
         seq: {type: integer, format: int64, minimum: 0}
     ReadPosition:
       type: object
-      required: [read_seq]
+      required: [delivered_seq, read_seq]
       properties:
+        delivered_seq: {type: integer, format: int64, minimum: 0}
         read_seq: {type: integer, format: int64, minimum: 0}
     CallInput:
       type: object
@@ -238,15 +265,17 @@ components:
         id: {type: integer, format: int64, description: Глобальный курсор событий.}
         type:
           type: string
-          enum: [message, call_ringing, call_accepted, call_rejected, call_cancelled, call_ended, call_timeout]
+          enum: [message, receipt, preview, file_expired, call_ringing, call_accepted, call_rejected, call_cancelled, call_ended, call_timeout, call_server_restart]
         chat_id: {$ref: '#/components/schemas/UUID'}
         occurred_at: {type: string, format: date-time}
         data:
           type: object
           description: |
-            message = {message_id, seq}; call_ringing = {call_id, caller_id,
+            message = {message_id, seq}; receipt = {user_id, delivered_seq,
+            read_seq}; preview = {attachment_id, state}; file_expired =
+            {attachment_id}; call_ringing = {call_id, caller_id,
             callee_id, kind}; call_accepted/rejected/cancelled/ended =
-            {call_id, state}; call_timeout = {call_id}. Для полного состояния
+            {call_id, state}; call_timeout/call_server_restart = {call_id}. Для полного состояния
             получите сообщение или звонок через HTTP.
     Signal:
       type: object
@@ -746,7 +775,7 @@ paths:
       tags: [Messages]
       operationId: markChatRead
       summary: Сдвинуть указатель прочитанного сообщения
-      description: Указатель монотонен и не превышает последний seq чата.
+      description: Указатель монотонен и не превышает последний seq чата. Чтение также подтверждает доставку; при изменении приходит событие receipt.
       parameters:
         - {$ref: '#/components/parameters/ChatID'}
       requestBody:
@@ -757,6 +786,31 @@ paths:
       responses:
         '200':
           description: Фактическая позиция чтения.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ReadPosition'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
+  /chats/{id}/delivered:
+    post:
+      tags: [Messages]
+      operationId: markChatDelivered
+      summary: Подтвердить получение сообщений до заданного seq
+      description: |
+        Клиент вызывает после фактической обработки полученных сообщений.
+        Сервер не считает саму запись сообщения доставкой устройству. Указатель
+        монотонен и ограничен последним seq чата; при изменении приходит receipt.
+      parameters:
+        - {$ref: '#/components/parameters/ChatID'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/ReadInput'}
+      responses:
+        '200':
+          description: Фактические указатели доставки и чтения.
           content:
             application/json:
               schema: {$ref: '#/components/schemas/ReadPosition'}
@@ -799,8 +853,9 @@ paths:
       description: |
         Тело — сырые байты, без multipart/form-data. Клиент должен указать
         Content-Length > 0, X-File-Name и MIME в Content-Type. По умолчанию
-        лимит 250 МиБ на файл и 10 ГиБ суммарно на пользователя; конфигурация
-        сервера может их изменить. Полученный id передайте в attachment_ids
+        лимит 250 МиБ на файл и 10 ГиБ суммарно на пользователя. Администратор
+        может изменить лимит файла в пределах серверного MAX_FILE_BYTES.
+        Полученный id передайте в attachment_ids
         при отправке сообщения. Пока сообщение не отправлено, другой участник
         чата не может скачать файл.
       parameters:

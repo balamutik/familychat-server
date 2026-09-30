@@ -27,8 +27,16 @@ type fileMeta struct {
 	ContentType  string `json:"content_type"`
 	Size         int64  `json:"size"`
 	PreviewState string `json:"preview_state"`
+	Available    bool   `json:"available"`
 	ObjectKey    string `json:"-"`
 	PreviewKey   string `json:"-"`
+}
+
+func maxAllowedFileBytes(d Dependencies) int64 {
+	if d.MaxFileBytes > 0 {
+		return d.MaxFileBytes
+	}
+	return 250 << 20
 }
 
 func registerFiles(mux *http.ServeMux, d Dependencies) {
@@ -49,9 +57,14 @@ func registerFiles(mux *http.ServeMux, d Dependencies) {
 			return
 		}
 		size := r.ContentLength
-		limit := d.MaxFileBytes
-		if limit <= 0 {
-			limit = 250 << 20
+		limit := maxAllowedFileBytes(d)
+		var configuredLimit int64
+		if err := d.DB.QueryRow(r.Context(), `SELECT max_file_bytes FROM settings WHERE singleton=true`).Scan(&configuredLimit); err != nil {
+			writeError(w, 500, "internal")
+			return
+		}
+		if configuredLimit < limit {
+			limit = configuredLimit
 		}
 		quota := d.UserQuotaBytes
 		if quota <= 0 {
@@ -95,7 +108,7 @@ func registerFiles(mux *http.ServeMux, d Dependencies) {
 			return
 		}
 		var used int64
-		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((SELECT sum(size_bytes) FROM attachments WHERE uploader_id=$1),0)+COALESCE((SELECT sum(reserved_bytes) FROM upload_reservations WHERE user_id=$1 AND state='uploading' AND expires_at>now()),0)`, p.UserID).Scan(&used); err != nil {
+		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((SELECT sum(size_bytes) FROM attachments WHERE uploader_id=$1 AND purged_at IS NULL),0)+COALESCE((SELECT sum(reserved_bytes) FROM upload_reservations WHERE user_id=$1 AND state='uploading' AND expires_at>now()),0)`, p.UserID).Scan(&used); err != nil {
 			writeError(w, 500, "internal")
 			return
 		}
@@ -186,7 +199,7 @@ func registerFiles(mux *http.ServeMux, d Dependencies) {
 			return
 		}
 		committed = true
-		writeJSON(w, 201, fileMeta{ID: id, ChatID: chatID, Filename: filename, ContentType: contentType, Size: size, PreviewState: state})
+		writeJSON(w, 201, fileMeta{ID: id, ChatID: chatID, Filename: filename, ContentType: contentType, Size: size, PreviewState: state, Available: true})
 	})
 	protected("GET /api/v1/files/{id}", func(w http.ResponseWriter, r *http.Request) {
 		p, _ := auth.PrincipalFrom(r.Context())
@@ -217,10 +230,12 @@ func authorizedFile(r *http.Request, d Dependencies, id, userID string) (fileMet
 	}
 	var m fileMeta
 	err := d.DB.QueryRow(r.Context(), `SELECT a.id::text,a.chat_id::text,a.object_key,COALESCE(a.preview_key,''),a.filename,a.content_type,a.size_bytes,a.preview_state
-		FROM attachments a JOIN chats c ON c.id=a.chat_id JOIN chat_members cm ON cm.chat_id=c.id
+		FROM attachments a JOIN chats c ON c.id=a.chat_id JOIN chat_members cm ON cm.chat_id=c.id CROSS JOIN settings s
 		WHERE a.id=$1 AND cm.user_id=$2 AND c.deleted_at IS NULL AND
+		a.purged_at IS NULL AND (s.retention_days=0 OR a.created_at>now()-s.retention_days*interval '1 day') AND
 		(EXISTS(SELECT 1 FROM message_attachments ma WHERE ma.attachment_id=a.id)
 		 OR (a.uploader_id=$2 AND NOT EXISTS(SELECT 1 FROM message_attachments ma WHERE ma.attachment_id=a.id)))`, id, userID).Scan(&m.ID, &m.ChatID, &m.ObjectKey, &m.PreviewKey, &m.Filename, &m.ContentType, &m.Size, &m.PreviewState)
+	m.Available = err == nil
 	return m, err
 }
 

@@ -60,6 +60,9 @@ func Load() (Config, error) {
 			*item.dst = n
 		}
 	}
+	if c.MaxFileBytes < 1<<20 {
+		return c, errors.New("MAX_FILE_BYTES must be at least 1048576")
+	}
 	if v := os.Getenv("S3_USE_PATH_STYLE"); v != "" {
 		b, err := strconv.ParseBool(v)
 		if err != nil {
