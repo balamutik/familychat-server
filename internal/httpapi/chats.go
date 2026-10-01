@@ -15,12 +15,15 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 func validUUID(id string) bool { return uuidPattern.MatchString(id) }
 
 type chatView struct {
-	ID          string `json:"id"`
-	Kind        string `json:"kind"`
-	Title       string `json:"title"`
-	Role        string `json:"role,omitempty"`
-	AvatarURL   string `json:"avatar_url,omitempty"`
-	UnreadCount int64  `json:"unread_count"`
+	ID                 string  `json:"id"`
+	Kind               string  `json:"kind"`
+	Title              string  `json:"title"`
+	Role               string  `json:"role,omitempty"`
+	AvatarURL          string  `json:"avatar_url,omitempty"`
+	UnreadCount        int64   `json:"unread_count"`
+	LastMessagePreview *string `json:"last_message_preview,omitempty"`
+	LastMessageAt      *string `json:"last_message_at,omitempty"`
+	LastMessageSender  *string `json:"last_message_sender,omitempty"`
 }
 
 func registerChats(mux *http.ServeMux, d Dependencies) {
@@ -131,10 +134,15 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		p, _ := auth.PrincipalFrom(r.Context())
 		rows, err := d.DB.Query(r.Context(), `SELECT c.id::text,c.kind,CASE WHEN c.kind='direct' THEN peer.login ELSE c.title END,m.role,
 			CASE WHEN peer.avatar_key IS NOT NULL AND NOT peer.disabled THEN '/api/v1/users/'||peer.id::text||'/avatar' ELSE '' END,
-			(SELECT count(*) FROM messages msg WHERE msg.chat_id=c.id AND msg.seq>m.read_seq AND msg.sender_id<>$1)
+			(SELECT count(*) FROM messages msg WHERE msg.chat_id=c.id AND msg.seq>m.read_seq AND msg.sender_id<>$1),
+			recent.preview,recent.created_at,recent.sender_login
 			FROM chats c JOIN chat_members m ON m.chat_id=c.id
 			LEFT JOIN users peer ON peer.id=CASE WHEN c.kind='direct' THEN CASE WHEN c.direct_user_low=$1 THEN c.direct_user_high ELSE c.direct_user_low END ELSE NULL END
-			WHERE m.user_id=$1 AND c.deleted_at IS NULL ORDER BY c.created_at DESC,c.id DESC LIMIT $2`, p.UserID, parseLimit(r))
+			LEFT JOIN LATERAL (SELECT COALESCE(NULLIF(LEFT(BTRIM(msg.body),160),''),
+				(SELECT a.filename FROM message_attachments ma JOIN attachments a ON a.id=ma.attachment_id WHERE ma.message_id=msg.id ORDER BY a.created_at LIMIT 1),
+				'Вложение') AS preview,msg.created_at::text AS created_at,msg.created_at AS sort_at,sender.login AS sender_login
+				FROM messages msg JOIN users sender ON sender.id=msg.sender_id WHERE msg.chat_id=c.id ORDER BY msg.seq DESC LIMIT 1) recent ON true
+			WHERE m.user_id=$1 AND c.deleted_at IS NULL ORDER BY COALESCE(recent.sort_at,c.created_at) DESC,c.id DESC LIMIT $2`, p.UserID, parseLimit(r))
 		if err != nil {
 			writeError(w, 500, "internal")
 			return
@@ -143,7 +151,8 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		list := []chatView{}
 		for rows.Next() {
 			var v chatView
-			if err := rows.Scan(&v.ID, &v.Kind, &v.Title, &v.Role, &v.AvatarURL, &v.UnreadCount); err != nil {
+			if err := rows.Scan(&v.ID, &v.Kind, &v.Title, &v.Role, &v.AvatarURL, &v.UnreadCount,
+				&v.LastMessagePreview, &v.LastMessageAt, &v.LastMessageSender); err != nil {
 				writeError(w, 500, "internal")
 				return
 			}
@@ -165,10 +174,16 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		var v chatView
 		err := d.DB.QueryRow(r.Context(), `SELECT c.id::text,c.kind,CASE WHEN c.kind='direct' THEN peer.login ELSE c.title END,m.role,
 			CASE WHEN peer.avatar_key IS NOT NULL AND NOT peer.disabled THEN '/api/v1/users/'||peer.id::text||'/avatar' ELSE '' END,
-			(SELECT count(*) FROM messages msg WHERE msg.chat_id=c.id AND msg.seq>m.read_seq AND msg.sender_id<>$2)
+			(SELECT count(*) FROM messages msg WHERE msg.chat_id=c.id AND msg.seq>m.read_seq AND msg.sender_id<>$2),
+			recent.preview,recent.created_at,recent.sender_login
 			FROM chats c JOIN chat_members m ON m.chat_id=c.id
 			LEFT JOIN users peer ON peer.id=CASE WHEN c.kind='direct' THEN CASE WHEN c.direct_user_low=$2 THEN c.direct_user_high ELSE c.direct_user_low END ELSE NULL END
-			WHERE c.id=$1 AND m.user_id=$2 AND c.deleted_at IS NULL`, id, p.UserID).Scan(&v.ID, &v.Kind, &v.Title, &v.Role, &v.AvatarURL, &v.UnreadCount)
+			LEFT JOIN LATERAL (SELECT COALESCE(NULLIF(LEFT(BTRIM(msg.body),160),''),
+				(SELECT a.filename FROM message_attachments ma JOIN attachments a ON a.id=ma.attachment_id WHERE ma.message_id=msg.id ORDER BY a.created_at LIMIT 1),
+				'Вложение') AS preview,msg.created_at::text AS created_at,sender.login AS sender_login
+				FROM messages msg JOIN users sender ON sender.id=msg.sender_id WHERE msg.chat_id=c.id ORDER BY msg.seq DESC LIMIT 1) recent ON true
+			WHERE c.id=$1 AND m.user_id=$2 AND c.deleted_at IS NULL`, id, p.UserID).Scan(&v.ID, &v.Kind, &v.Title, &v.Role, &v.AvatarURL, &v.UnreadCount,
+			&v.LastMessagePreview, &v.LastMessageAt, &v.LastMessageSender)
 		if err != nil {
 			writeError(w, 404, "not_found")
 			return

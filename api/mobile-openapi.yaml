@@ -114,6 +114,9 @@ components:
         role: {type: string, enum: [owner, admin, member]}
         avatar_url: {type: string, description: Публичный аватар собеседника в личном чате; отсутствует для группы и профиля без аватара.}
         unread_count: {type: integer, format: int64, minimum: 0, description: Число сообщений других участников после последней отмеченной позиции прочтения.}
+        last_message_preview: {type: string, description: Первые 160 символов текста последнего сообщения или имя первого вложения; отсутствует в пустом чате.}
+        last_message_at: {type: string, format: date-time, description: Время последнего сообщения; отсутствует в пустом чате.}
+        last_message_sender: {type: string, description: Логин отправителя последнего сообщения; используется для превью группы.}
     Member:
       type: object
       required: [id, login, role]

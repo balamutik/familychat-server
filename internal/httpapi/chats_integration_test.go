@@ -144,6 +144,103 @@ func TestChatUnreadCountTracksReceivedMessagesAndReadPosition(t *testing.T) {
 	}
 }
 
+func TestChatListIncludesLatestMessagePreviewAndTime(t *testing.T) {
+	pool := testDatabase(t)
+	senderID, senderToken := seedSession(t, pool, "user")
+	recipientID, recipientToken := seedSession(t, pool, "user")
+	h := New(Dependencies{DB: pool, Auth: &auth.Service{DB: pool, TTL: time.Hour}})
+	r := callAPI(h, "POST", "/api/v1/chats/direct", fmt.Sprintf(`{"user_id":%q}`, recipientID), senderToken)
+	if r.Code != 201 {
+		t.Fatalf("create chat: %d %s", r.Code, r.Body.String())
+	}
+	var chat struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(r.Body.Bytes(), &chat); err != nil {
+		t.Fatal(err)
+	}
+	list := func() map[string]any {
+		t.Helper()
+		r := callAPI(h, "GET", "/api/v1/chats", "", recipientToken)
+		if r.Code != 200 {
+			t.Fatalf("list chats: %d %s", r.Code, r.Body.String())
+		}
+		var result struct {
+			Chats []map[string]any `json:"chats"`
+		}
+		if err := json.Unmarshal(r.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		for _, item := range result.Chats {
+			if item["id"] == chat.ID {
+				return item
+			}
+		}
+		t.Fatalf("chat %s missing", chat.ID)
+		return nil
+	}
+	if got := list()["last_message_preview"]; got != nil {
+		t.Fatalf("empty chat preview=%v", got)
+	}
+	thirdID, _ := seedSession(t, pool, "user")
+	r = callAPI(h, "POST", "/api/v1/chats/direct", fmt.Sprintf(`{"user_id":%q}`, thirdID), senderToken)
+	if r.Code != 201 {
+		t.Fatalf("create second chat: %d %s", r.Code, r.Body.String())
+	}
+	r = callAPI(h, "POST", "/api/v1/chats/"+chat.ID+"/messages", `{"client_message_id":"00000000-0000-4000-8000-000000000031","text":"Первое"}`, senderToken)
+	if r.Code != 201 {
+		t.Fatalf("first message: %d %s", r.Code, r.Body.String())
+	}
+	r = callAPI(h, "POST", "/api/v1/chats/"+chat.ID+"/messages", `{"client_message_id":"00000000-0000-4000-8000-000000000032","text":"Новое сообщение"}`, senderToken)
+	if r.Code != 201 {
+		t.Fatalf("second message: %d %s", r.Code, r.Body.String())
+	}
+	item := list()
+	if item["last_message_preview"] != "Новое сообщение" {
+		t.Fatalf("preview=%v", item["last_message_preview"])
+	}
+	if item["last_message_at"] == nil || item["last_message_at"] == "" {
+		t.Fatalf("missing message time: %v", item)
+	}
+	var senderLogin string
+	if err := pool.QueryRow(t.Context(), `SELECT login FROM users WHERE id=$1`, senderID).Scan(&senderLogin); err != nil {
+		t.Fatal(err)
+	}
+	if item["last_message_sender"] != senderLogin {
+		t.Fatalf("sender=%v, want %s", item["last_message_sender"], senderLogin)
+	}
+	r = callAPI(h, "GET", "/api/v1/chats", "", senderToken)
+	if r.Code != 200 {
+		t.Fatalf("list sender chats: %d %s", r.Code, r.Body.String())
+	}
+	var ordered struct {
+		Chats []struct {
+			ID string `json:"id"`
+		} `json:"chats"`
+	}
+	if err := json.Unmarshal(r.Body.Bytes(), &ordered); err != nil {
+		t.Fatal(err)
+	}
+	if len(ordered.Chats) < 2 || ordered.Chats[0].ID != chat.ID {
+		t.Fatalf("updated chat should be first: %+v", ordered.Chats)
+	}
+	var fileID, messageID string
+	if err := pool.QueryRow(t.Context(), `INSERT INTO attachments(chat_id,uploader_id,object_key,filename,content_type,size_bytes,preview_state)
+		VALUES($1,$2,$3,'семейное фото.jpg','image/jpeg',5,'pending') RETURNING id::text`, chat.ID, senderID, "tests/preview-"+chat.ID).Scan(&fileID); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(t.Context(), `INSERT INTO messages(chat_id,seq,sender_id,client_message_id,body)
+		VALUES($1,3,$2,gen_random_uuid(),'') RETURNING id::text`, chat.ID, senderID).Scan(&messageID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(t.Context(), `INSERT INTO message_attachments(message_id,attachment_id) VALUES($1,$2)`, messageID, fileID); err != nil {
+		t.Fatal(err)
+	}
+	if got := list()["last_message_preview"]; got != "семейное фото.jpg" {
+		t.Fatalf("attachment preview=%v", got)
+	}
+}
+
 func TestGroupRolesAndRemovedMember(t *testing.T) {
 	pool := testDatabase(t)
 	owner, ownerToken := seedSession(t, pool, "user")
