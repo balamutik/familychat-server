@@ -277,13 +277,13 @@ func (w *Worker) purgeExpired(ctx context.Context) (bool, error) {
 	if err = tx.QueryRow(ctx, `SELECT retention_days FROM settings WHERE singleton=true FOR SHARE`).Scan(&retentionDays); err != nil {
 		return false, err
 	}
-	if retentionDays == 0 {
-		return false, nil
-	}
 	var id, chatID, objectKey, previewKey string
-	err = tx.QueryRow(ctx, `SELECT id::text,chat_id::text,object_key,COALESCE(preview_key,'') FROM attachments
-		WHERE purged_at IS NULL AND created_at<=now()-$1::integer*interval '1 day'
-		ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1`, retentionDays).Scan(&id, &chatID, &objectKey, &previewKey)
+	err = tx.QueryRow(ctx, `SELECT a.id::text,a.chat_id::text,a.object_key,COALESCE(a.preview_key,'') FROM attachments a
+		WHERE a.purged_at IS NULL AND
+			(($1::integer>0 AND a.created_at<=now()-$1::integer*interval '1 day') OR
+			 (a.created_at<=now()-interval '1 day' AND NOT EXISTS
+				(SELECT 1 FROM message_attachments ma WHERE ma.attachment_id=a.id)))
+		ORDER BY a.created_at FOR UPDATE OF a SKIP LOCKED LIMIT 1`, retentionDays).Scan(&id, &chatID, &objectKey, &previewKey)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}

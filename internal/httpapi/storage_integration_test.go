@@ -112,4 +112,10 @@ func TestAdminStorageSettings(t *testing.T) {
 	if r := callAPI(h, "POST", pathToChat+"/messages", message, userToken); r.Code != 404 {
 		t.Fatalf("expired attachment reused: %d %s", r.Code, r.Body.String())
 	}
+	if _, err := pool.Exec(t.Context(), `UPDATE settings SET retention_days=0 WHERE singleton=true`); err != nil {
+		t.Fatal(err)
+	}
+	if r := callAPI(h, "POST", pathToChat+"/messages", message, userToken); r.Code != 404 {
+		t.Fatalf("unattached file older than a day reused: %d %s", r.Code, r.Body.String())
+	}
 }

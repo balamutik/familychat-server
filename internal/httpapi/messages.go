@@ -127,11 +127,13 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 					return
 				}
 				seen[id] = true
-				var valid bool
-				err = tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM attachments a CROSS JOIN settings s WHERE a.id=$1 AND a.chat_id=$2 AND a.uploader_id=$3
+				var lockedID string
+				err = tx.QueryRow(r.Context(), `SELECT a.id::text FROM attachments a CROSS JOIN settings s WHERE a.id=$1 AND a.chat_id=$2 AND a.uploader_id=$3
 					AND a.purged_at IS NULL AND (s.retention_days=0 OR a.created_at>now()-s.retention_days*interval '1 day')
-					AND NOT EXISTS(SELECT 1 FROM message_attachments ma WHERE ma.attachment_id=a.id))`, id, chatID, p.UserID).Scan(&valid)
-				if err != nil || !valid {
+					AND a.created_at>now()-interval '1 day'
+					AND NOT EXISTS(SELECT 1 FROM message_attachments ma WHERE ma.attachment_id=a.id)
+					FOR UPDATE OF a`, id, chatID, p.UserID).Scan(&lockedID)
+				if err != nil {
 					writeError(w, 404, "attachment_not_found")
 					return
 				}
