@@ -254,7 +254,7 @@ paths:
   /chats:
     get:
       summary: Current user's chats
-      responses: {'200': {description: Chats}}
+      responses: {'200': {description: Chats include unread_count of other members' messages since the user's read position.}}
     post:
       summary: Create group chat
       requestBody:

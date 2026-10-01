@@ -104,7 +104,7 @@ components:
           description: Одноразовый билет, срок действия 30 секунд.
     Chat:
       type: object
-      required: [id, kind, title, role]
+      required: [id, kind, title, role, unread_count]
       properties:
         id: {$ref: '#/components/schemas/UUID'}
         kind: {type: string, enum: [direct, group]}
@@ -113,6 +113,7 @@ components:
           description: В личном чате это актуальный логин собеседника.
         role: {type: string, enum: [owner, admin, member]}
         avatar_url: {type: string, description: Публичный аватар собеседника в личном чате; отсутствует для группы и профиля без аватара.}
+        unread_count: {type: integer, format: int64, minimum: 0, description: Число сообщений других участников после последней отмеченной позиции прочтения.}
     Member:
       type: object
       required: [id, login, role]

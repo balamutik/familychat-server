@@ -15,11 +15,12 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 func validUUID(id string) bool { return uuidPattern.MatchString(id) }
 
 type chatView struct {
-	ID        string `json:"id"`
-	Kind      string `json:"kind"`
-	Title     string `json:"title"`
-	Role      string `json:"role,omitempty"`
-	AvatarURL string `json:"avatar_url,omitempty"`
+	ID          string `json:"id"`
+	Kind        string `json:"kind"`
+	Title       string `json:"title"`
+	Role        string `json:"role,omitempty"`
+	AvatarURL   string `json:"avatar_url,omitempty"`
+	UnreadCount int64  `json:"unread_count"`
 }
 
 func registerChats(mux *http.ServeMux, d Dependencies) {
@@ -83,6 +84,13 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		if peerHasAvatar {
 			v.AvatarURL = avatarURL(body.UserID)
 		}
+		if !created {
+			if err := d.DB.QueryRow(r.Context(), `SELECT count(*) FROM messages msg JOIN chat_members cm ON cm.chat_id=msg.chat_id
+				WHERE cm.chat_id=$1 AND cm.user_id=$2 AND msg.seq>cm.read_seq AND msg.sender_id<>$2`, id, p.UserID).Scan(&v.UnreadCount); err != nil {
+				writeError(w, 500, "internal")
+				return
+			}
+		}
 		writeJSON(w, status, v)
 	})
 	protected("POST /api/v1/chats", func(w http.ResponseWriter, r *http.Request) {
@@ -122,7 +130,8 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 	protected("GET /api/v1/chats", func(w http.ResponseWriter, r *http.Request) {
 		p, _ := auth.PrincipalFrom(r.Context())
 		rows, err := d.DB.Query(r.Context(), `SELECT c.id::text,c.kind,CASE WHEN c.kind='direct' THEN peer.login ELSE c.title END,m.role,
-			CASE WHEN peer.avatar_key IS NOT NULL AND NOT peer.disabled THEN '/api/v1/users/'||peer.id::text||'/avatar' ELSE '' END
+			CASE WHEN peer.avatar_key IS NOT NULL AND NOT peer.disabled THEN '/api/v1/users/'||peer.id::text||'/avatar' ELSE '' END,
+			(SELECT count(*) FROM messages msg WHERE msg.chat_id=c.id AND msg.seq>m.read_seq AND msg.sender_id<>$1)
 			FROM chats c JOIN chat_members m ON m.chat_id=c.id
 			LEFT JOIN users peer ON peer.id=CASE WHEN c.kind='direct' THEN CASE WHEN c.direct_user_low=$1 THEN c.direct_user_high ELSE c.direct_user_low END ELSE NULL END
 			WHERE m.user_id=$1 AND c.deleted_at IS NULL ORDER BY c.created_at DESC,c.id DESC LIMIT $2`, p.UserID, parseLimit(r))
@@ -134,7 +143,7 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		list := []chatView{}
 		for rows.Next() {
 			var v chatView
-			if err := rows.Scan(&v.ID, &v.Kind, &v.Title, &v.Role, &v.AvatarURL); err != nil {
+			if err := rows.Scan(&v.ID, &v.Kind, &v.Title, &v.Role, &v.AvatarURL, &v.UnreadCount); err != nil {
 				writeError(w, 500, "internal")
 				return
 			}
@@ -155,10 +164,11 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		p, _ := auth.PrincipalFrom(r.Context())
 		var v chatView
 		err := d.DB.QueryRow(r.Context(), `SELECT c.id::text,c.kind,CASE WHEN c.kind='direct' THEN peer.login ELSE c.title END,m.role,
-			CASE WHEN peer.avatar_key IS NOT NULL AND NOT peer.disabled THEN '/api/v1/users/'||peer.id::text||'/avatar' ELSE '' END
+			CASE WHEN peer.avatar_key IS NOT NULL AND NOT peer.disabled THEN '/api/v1/users/'||peer.id::text||'/avatar' ELSE '' END,
+			(SELECT count(*) FROM messages msg WHERE msg.chat_id=c.id AND msg.seq>m.read_seq AND msg.sender_id<>$2)
 			FROM chats c JOIN chat_members m ON m.chat_id=c.id
 			LEFT JOIN users peer ON peer.id=CASE WHEN c.kind='direct' THEN CASE WHEN c.direct_user_low=$2 THEN c.direct_user_high ELSE c.direct_user_low END ELSE NULL END
-			WHERE c.id=$1 AND m.user_id=$2 AND c.deleted_at IS NULL`, id, p.UserID).Scan(&v.ID, &v.Kind, &v.Title, &v.Role, &v.AvatarURL)
+			WHERE c.id=$1 AND m.user_id=$2 AND c.deleted_at IS NULL`, id, p.UserID).Scan(&v.ID, &v.Kind, &v.Title, &v.Role, &v.AvatarURL, &v.UnreadCount)
 		if err != nil {
 			writeError(w, 404, "not_found")
 			return
