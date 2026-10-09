@@ -217,10 +217,11 @@ def activate(root, candidate, state):
 
 
 def prompt(message):
-    with open('/dev/tty', 'r+') as tty:
-        tty.write(message + ' ')
-        tty.flush()
-        value = tty.readline()
+    # Buffered read/write mode requires seek support, which terminals do not have.
+    with open('/dev/tty', 'w', encoding='utf-8') as output, open('/dev/tty', 'r', encoding='utf-8') as source:
+        output.write(message + ' ')
+        output.flush()
+        value = source.readline()
     if not value:
         raise InstallError('Ввод прерван.')
     return value.strip()
