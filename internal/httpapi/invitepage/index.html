@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Приглашение — FamilyChat</title><link rel="stylesheet" href="../invite-assets/invite.css"><script src="../invite-assets/invite.js" defer></script></head>
+<body><main><div class="mark" aria-hidden="true">F</div><p class="eyebrow">FAMILYCHAT</p>
+{{if .Valid}}<h1>Вас приглашают<br>в «{{.Name}}»</h1><p class="intro">Разговоры с близкими — в вашем пространстве.</p><p class="server">{{.Address}}</p>
+<a class="primary" id="open-app" data-invite="{{.InviteURL}}" href="#">Открыть FamilyChat</a><p id="status" role="status">Открываем приложение…</p>
+<div class="install"><h2>Ещё нет приложения?</h2><p>Установите FamilyChat, затем откройте это приглашение ещё раз.</p><a href="https://apps.apple.com/app/id0000000000" rel="noreferrer">Скачать в App Store ↗</a><small>Приложение готовится к публикации. Ссылка App Store временная.</small></div>
+{{else}}<h1>Приглашение недоступно</h1><p class="intro">{{.Message}}</p>{{end}}
+<footer>Ваш сервер. Ваша семья.</footer></main></body></html>

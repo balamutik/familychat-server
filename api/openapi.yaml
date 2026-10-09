@@ -91,6 +91,73 @@ components:
 security:
   - bearer: []
 paths:
+  /api/v1/admin/invites:
+    get:
+      summary: List the 100 most recent invitations (administrator only)
+      responses:
+        '200': {description: Invitations with URL, expiration and revocation status}
+        '401': {description: Authentication required}
+        '403': {description: Administrator required}
+    post:
+      summary: Create a reusable server invitation (administrator only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [server_name, server_url, expires_at]
+              properties:
+                server_name: {type: string, minLength: 1, maxLength: 100}
+                server_url: {type: string, format: uri, description: Public HTTP or HTTPS base address without credentials or query}
+                expires_at: {type: string, format: date-time, description: Future expiration in RFC3339, at most one year ahead}
+      responses:
+        '201': {description: Invitation including id, url and expires_at}
+        '400': {description: Invalid name, address or expiration}
+        '401': {description: Authentication required}
+        '403': {description: Administrator required}
+  /api/v1/admin/invites/{id}:
+    delete:
+      summary: Revoke an invitation immediately (administrator only)
+      parameters:
+        - {name: id, in: path, required: true, schema: {type: string, format: uuid}}
+      responses:
+        '204': {description: Revoked, including already revoked invitations}
+        '404': {description: Invitation not found}
+        '401': {description: Authentication required}
+        '403': {description: Administrator required}
+  /api/v1/invites/{token}:
+    get:
+      summary: Resolve an active invitation without authenticating a user
+      security: []
+      parameters:
+        - {name: token, in: path, required: true, schema: {type: string, pattern: '^[0-9a-f]{64}$'}}
+      responses:
+        '200':
+          description: Server connection metadata; never a user session. Cache-Control is no-store.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [server_name, server_url, registration_enabled, expires_at]
+                properties:
+                  server_name: {type: string}
+                  server_url: {type: string, format: uri}
+                  registration_enabled: {type: boolean}
+                  expires_at: {type: string, format: date-time}
+        '404': {description: Unknown or malformed invitation}
+        '410': {description: Expired or revoked invitation}
+        '503': {description: Server unavailable}
+  /invite/{token}:
+    get:
+      summary: Public invitation landing page with app launch and placeholder App Store link
+      security: []
+      parameters:
+        - {name: token, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {description: HTML invitation page}
+        '404': {description: Unknown invitation page}
+        '410': {description: Expired or revoked invitation page}
   /auth/register:
     post:
       security: []

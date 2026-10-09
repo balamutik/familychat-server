@@ -10,3 +10,5 @@
 .storage-save{height:48px;padding:0 1.4rem;border:0;border-radius:10px;color:white;background:#147d73;font-weight:700}
 .storage-save:hover{background:#0d6860}
 @media(max-width:680px){.storage-section{padding:1.3rem}.storage-fields{grid-template-columns:1fr}}
+
+.invitations-section{padding:32px 0;border-bottom:1px solid var(--border,#dce5df)}.invitation-form{display:grid;grid-template-columns:1fr 1.5fr 1.1fr;gap:18px;align-items:start;margin:24px 0}.invitation-form label{display:grid;gap:8px;font-size:14px}.invitation-form small{font-size:12px;font-weight:400;opacity:.7;line-height:1.5}.invitation-form button{grid-column:1/-1;justify-self:start}.invitation-list{list-style:none;padding:0;margin:24px 0;display:grid;gap:16px}.invitation-list li{padding:20px;border:1px solid var(--border,#dce5df);border-radius:12px}.invitation-heading{display:flex;flex-wrap:wrap;gap:12px;justify-content:space-between;margin-bottom:14px}.invitation-heading span{font-size:13px;opacity:.75}.invitation-list input{width:100%;font-size:13px}.invitation-actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:12px}@media(max-width:900px){.invitation-form{grid-template-columns:1fr}}

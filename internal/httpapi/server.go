@@ -52,6 +52,7 @@ func New(deps Dependencies) http.Handler {
 		_, _ = w.Write([]byte(`{"status":"ready"}`))
 	})
 	registerAuth(mux, deps)
+	registerInvites(mux, deps)
 	registerChats(mux, deps)
 	registerUsers(mux, deps)
 	registerAvatars(mux, deps)
