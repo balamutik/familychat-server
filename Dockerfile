@@ -13,8 +13,10 @@ COPY cmd ./cmd
 COPY internal ./internal
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/familychat ./cmd/familychat
 
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg libheif-examples librsvg2-bin && rm -rf /var/lib/apt/lists/* && useradd --uid 10001 --create-home familychat
+FROM debian:trixie-slim
+# Current libheif understands auxiliary image references in recent iPhone HEICs.
+# The HEVC decoder is a separate package, omitted by --no-install-recommends.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg libheif-examples libheif-plugin-libde265 librsvg2-bin && rm -rf /var/lib/apt/lists/* && useradd --uid 10001 --create-home familychat
 COPY --from=go-build /out/familychat /usr/local/bin/familychat
 COPY --from=admin-build /src/admin/dist /app/admin
 ENV ADMIN_STATIC_DIR=/app/admin

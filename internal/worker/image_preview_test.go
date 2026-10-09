@@ -94,3 +94,25 @@ func TestImagePreviewRejectsMismatchedContentType(t *testing.T) {
 		t.Fatalf("spoofed image accepted: state=%q size=%d", state, len(store.output))
 	}
 }
+
+// Keep private camera originals outside the repository while allowing the same
+// worker pipeline to be exercised against a reported HEIC decoding failure.
+func TestCameraHEICPreview(t *testing.T) {
+	filename := os.Getenv("TEST_HEIC_FILE")
+	if filename == "" {
+		t.Skip("set TEST_HEIC_FILE to test a camera HEIC original")
+	}
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &imagePreviewStore{input: data}
+	state, key := (&Worker{Objects: store}).makePreview(t.Context(), job{AttachmentID: "camera", ObjectKey: "original", ContentType: "image/heic"})
+	if state != "ready" || key != store.key || store.mediaType != "image/png" {
+		t.Fatalf("camera HEIC: state=%q key=%q content-type=%q", state, key, store.mediaType)
+	}
+	config, err := png.DecodeConfig(bytes.NewReader(store.output))
+	if err != nil || config.Width < 1 || config.Height < 1 || config.Width > 640 || config.Height > 640 {
+		t.Fatalf("invalid camera preview: dimensions=%+v error=%v", config, err)
+	}
+}

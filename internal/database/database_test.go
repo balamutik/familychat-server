@@ -115,3 +115,83 @@ func TestImagePreviewMigrationRetriesOnlyMissingSupportedImages(t *testing.T) {
 		t.Fatalf("got %d attachments, want %d", count, len(expected))
 	}
 }
+
+func TestHEIFPreviewMigrationRetriesOnlyFailedMissingPreviews(t *testing.T) {
+	url := os.Getenv("TEST_DATABASE_URL")
+	if url == "" {
+		t.Skip("set TEST_DATABASE_URL to run PostgreSQL migration integration test")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	pool, err := Open(ctx, url)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	if err := Migrate(ctx, pool); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	var userID, chatID string
+	if err := tx.QueryRow(ctx, `INSERT INTO users(login,password_hash) VALUES('heif'||substr(replace(gen_random_uuid()::text,'-',''),1,16),'hash') RETURNING id::text`).Scan(&userID); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.QueryRow(ctx, `INSERT INTO chats(kind,title) VALUES('group','HEIF migration test') RETURNING id::text`).Scan(&chatID); err != nil {
+		t.Fatal(err)
+	}
+	body, err := migrationFiles.ReadFile("migrations/0009_retry_heif_previews.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, mediaType, state    string
+		purged, hasPreview, retry bool
+	}{
+		{"failed HEIC", "image/heic", "failed", false, false, true},
+		{"normalized HEIF", " IMAGE/HEIF ; codecs=hevc", "unsupported", false, false, true},
+		{"HEIC sequence", "image/heic-sequence", "failed", false, false, true},
+		{"HEIF sequence", "image/heif-sequence", "failed", false, false, true},
+		{"purged original", "image/heic", "failed", true, false, false},
+		{"existing preview", "image/heic", "failed", false, true, false},
+		{"ready", "image/heic", "ready", false, true, false},
+		{"pending", "image/heic", "pending", false, false, false},
+		{"processing", "image/heic", "processing", false, false, false},
+		{"other image", "image/jpeg", "failed", false, false, false},
+		{"other file", "application/octet-stream", "failed", false, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var id string
+			err := tx.QueryRow(ctx, `INSERT INTO attachments(chat_id,uploader_id,object_key,filename,content_type,size_bytes,preview_state,purged_at,preview_key)
+				VALUES($1,$2,'tests/'||gen_random_uuid()::text,'image',$3,100,$4,CASE WHEN $5 THEN now() END,CASE WHEN $6 THEN 'previews/'||gen_random_uuid()::text END) RETURNING id::text`, chatID, userID, tc.mediaType, tc.state, tc.purged, tc.hasPreview).Scan(&id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := tx.Exec(ctx, `INSERT INTO preview_jobs(attachment_id,state,attempts,lease_until) VALUES($1,$2,3,now()+interval '1 minute')`, id, tc.state); err != nil {
+				t.Fatal(err)
+			}
+			// A second run must preserve the result, including attempts on active jobs.
+			for i := 0; i < 2; i++ {
+				if _, err := tx.Exec(ctx, string(body)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var attachmentState, jobState string
+			var attempts int
+			var leaseCleared bool
+			if err := tx.QueryRow(ctx, `SELECT a.preview_state,j.state,j.attempts,j.lease_until IS NULL FROM attachments a JOIN preview_jobs j ON j.attachment_id=a.id WHERE a.id=$1`, id).Scan(&attachmentState, &jobState, &attempts, &leaseCleared); err != nil {
+				t.Fatal(err)
+			}
+			wantState, wantAttempts := tc.state, 3
+			if tc.retry {
+				wantState, wantAttempts = "pending", 0
+			}
+			if attachmentState != wantState || jobState != wantState || attempts != wantAttempts || leaseCleared != tc.retry {
+				t.Fatalf("attachment=%s job=%s attempts=%d leaseCleared=%v", attachmentState, jobState, attempts, leaseCleared)
+			}
+		})
+	}
+}
