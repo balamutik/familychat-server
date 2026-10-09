@@ -19,8 +19,8 @@ info:
     в x-websocket-messages; обычные генераторы HTTP-клиента их не создают.
     Для мобильного клиента после разрыва соединения REST-история остаётся
     источником истины, а повторные события следует устранять по id.
-    Push-уведомлений для спящего приложения в этой версии нет; входящий звонок
-    доставляется через активное WebSocket-соединение.
+    При настроенном APNs сервер отправляет уведомления о новых сообщениях и
+    VoIP push для входящих звонков. Текст сообщения в push не передаётся.
 servers:
   - url: /api/v1
     description: Тот же origin, что и сервер; в мобильном приложении задайте HTTPS base URL.
@@ -32,6 +32,7 @@ tags:
   - name: Files
   - name: Events
   - name: Calls
+  - name: Push
 security:
   - bearerAuth: []
 components:
@@ -66,6 +67,15 @@ components:
     UUID:
       type: string
       format: uuid
+    PushDeviceInput:
+      type: object
+      additionalProperties: false
+      required: [client_server_id]
+      properties:
+        client_server_id: {$ref: '#/components/schemas/UUID'}
+        alert_token: {type: string, pattern: '^[a-fA-F0-9]{64,256}$'}
+        voip_token: {type: string, pattern: '^[a-fA-F0-9]{64,256}$'}
+      description: Нужен хотя бы один токен; повторный PUT заменяет оба токена текущей сессии.
     Error:
       type: object
       required: [error]
@@ -557,6 +567,33 @@ paths:
       responses:
         '204': {$ref: '#/components/responses/NoContent'}
         '401': {$ref: '#/components/responses/Unauthorized'}
+  /push/devices/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/UUID'}
+        description: Постоянный идентификатор этой установки приложения.
+    put:
+      tags: [Push]
+      operationId: registerPushDevice
+      summary: Зарегистрировать токены APNs текущей сессии
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PushDeviceInput'}
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+    delete:
+      tags: [Push]
+      operationId: removePushDevice
+      summary: Удалить регистрацию этой установки для текущей сессии
+      responses:
+        '204': {$ref: '#/components/responses/NoContent'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
   /auth/change-password:
     post:
       tags: [Auth]
@@ -638,8 +675,10 @@ paths:
       operationId: replaceOwnAvatar
       summary: Загрузить или заменить свой аватар
       description: |
-        Сырые байты JPEG или PNG, без multipart/form-data. Нужен Content-Length.
-        Сервер проверяет формат изображения и предел 4096×4096 пикселей.
+        Сырые байты JPEG, PNG/APNG, GIF, WebP, HEIC/HEIF, AVIF, BMP, TIFF, ICO или SVG,
+        без multipart/form-data. Нужен Content-Length. Сервер сверяет MIME с содержимым.
+        JPEG/PNG сохраняются без преобразования и имеют предел 4096×4096 пикселей;
+        остальные форматы становятся PNG первого кадра размером до 512 пикселей.
         Максимум — 5 МиБ или меньший лимит файла, установленный администратором;
         размер текущего аватара входит в пользовательскую квоту.
         Старое изображение после замены удаляется из S3 фоновым worker.
@@ -650,6 +689,24 @@ paths:
             schema: {type: string, format: binary}
           image/png:
             schema: {type: string, format: binary}
+          image/gif:
+            schema: {type: string, format: binary}
+          image/webp:
+            schema: {type: string, format: binary}
+          image/heic:
+            schema: {type: string, format: binary}
+          image/heif:
+            schema: {type: string, format: binary}
+          image/avif:
+            schema: {type: string, format: binary}
+          image/bmp:
+            schema: {type: string, format: binary}
+          image/tiff:
+            schema: {type: string, format: binary}
+          image/x-icon:
+            schema: {type: string, format: binary}
+          image/svg+xml:
+            schema: {type: string, format: binary}
       responses:
         '200':
           description: Аватар сохранён.
@@ -659,7 +716,7 @@ paths:
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '413': {description: Изображение превышает лимит.}
-        '415': {description: Разрешены только image/jpeg и image/png.}
+        '415': {description: MIME-тип изображения не поддерживается.}
     delete:
       tags: [Users]
       operationId: deleteOwnAvatar
@@ -1051,6 +1108,22 @@ paths:
             schema: {type: string, format: binary}
           image/png:
             schema: {type: string, format: binary}
+          image/heic:
+            schema: {type: string, format: binary}
+          image/heif:
+            schema: {type: string, format: binary}
+          image/avif:
+            schema: {type: string, format: binary}
+          image/gif:
+            schema: {type: string, format: binary}
+          image/webp:
+            schema: {type: string, format: binary}
+          image/bmp:
+            schema: {type: string, format: binary}
+          image/tiff:
+            schema: {type: string, format: binary}
+          image/svg+xml:
+            schema: {type: string, format: binary}
           video/mp4:
             schema: {type: string, format: binary}
         description: Можно передать любой MIME; перечислены лишь частые типы.
@@ -1141,23 +1214,27 @@ paths:
     get:
       tags: [Files]
       operationId: downloadFilePreview
-      summary: Скачать JPEG-превью с проверкой Bearer и членства
+      summary: Скачать PNG-превью изображения или JPEG-превью видео с проверкой Bearer и членства
       description: Если preview_state ещё не ready либо превью не создано, возвращается 404.
       responses:
         '200':
-          description: Полное JPEG-превью.
+          description: Полное PNG-превью изображения или JPEG-превью видео.
           headers:
             Accept-Ranges: {schema: {type: string}, example: bytes}
             Cache-Control: {schema: {type: string}, example: 'private, no-store'}
           content:
             image/jpeg:
               schema: {type: string, format: binary}
+            image/png:
+              schema: {type: string, format: binary}
         '206':
-          description: Диапазон байтов JPEG-превью.
+          description: Диапазон байтов PNG- или JPEG-превью.
           headers:
             Content-Range: {schema: {type: string}}
           content:
             image/jpeg:
+              schema: {type: string, format: binary}
+            image/png:
               schema: {type: string, format: binary}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {$ref: '#/components/responses/NotFound'}
@@ -1167,7 +1244,7 @@ paths:
       operationId: headFilePreview
       summary: Проверить доступ и заголовки превью без тела
       responses:
-        '200': {description: Заголовки полного JPEG-превью, без тела.}
+        '200': {description: Заголовки полного PNG- или JPEG-превью, без тела.}
         '206': {description: Заголовки диапазона, без тела.}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {$ref: '#/components/responses/NotFound'}

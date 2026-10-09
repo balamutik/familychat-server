@@ -18,6 +18,7 @@ import (
 	"familychat/server/internal/events"
 	"familychat/server/internal/httpapi"
 	"familychat/server/internal/objects"
+	"familychat/server/internal/push"
 	"familychat/server/internal/worker"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -92,9 +93,13 @@ func run(ctx context.Context, args []string) error {
 	}
 	store := objects.New(c)
 	if args[0] == "worker" {
+		pushClient, err := push.New(c)
+		if err != nil {
+			return err
+		}
 		stopCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 		defer stop()
-		return (&worker.Worker{DB: pool, Objects: store}).Run(stopCtx)
+		return (&worker.Worker{DB: pool, Objects: store, Push: pushClient}).Run(stopCtx)
 	}
 	service := &auth.Service{DB: pool, TTL: c.SessionTTL}
 	hub := events.NewHub(pool)
@@ -123,7 +128,7 @@ func run(ctx context.Context, args []string) error {
 			}
 		}
 	}()
-	h := httpapi.New(httpapi.Dependencies{DB: pool, Objects: store, Auth: service, Events: hub, AllowedOrigins: c.AllowedOrigins, TurnURL: c.TurnURL, TurnSecret: c.TurnSecret, MaxFileBytes: c.MaxFileBytes, UserQuotaBytes: c.UserQuotaBytes, AdminStaticDir: os.Getenv("ADMIN_STATIC_DIR")})
+	h := httpapi.New(httpapi.Dependencies{DB: pool, Objects: store, Auth: service, Events: hub, AllowedOrigins: c.AllowedOrigins, TurnURL: c.TurnURL, TurnSecret: c.TurnSecret, PushEnabled: c.APNsKeyFile != "", MaxFileBytes: c.MaxFileBytes, UserQuotaBytes: c.UserQuotaBytes, AdminStaticDir: os.Getenv("ADMIN_STATIC_DIR")})
 	srv := &http.Server{Addr: c.ListenAddr, Handler: h, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	signalCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()

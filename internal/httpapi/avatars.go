@@ -12,10 +12,10 @@ import (
 	"io"
 	"net/http"
 	"strconv"
-	"strings"
 	"time"
 
 	"familychat/server/internal/auth"
+	"familychat/server/internal/imaging"
 )
 
 const maxAvatarBytes int64 = 5 << 20
@@ -26,8 +26,8 @@ func registerAvatars(mux *http.ServeMux, d Dependencies) {
 			writeError(w, 503, "storage_unavailable")
 			return
 		}
-		contentType := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
-		if contentType != "image/jpeg" && contentType != "image/png" {
+		contentType := imaging.MediaType(r.Header.Get("Content-Type"))
+		if !imaging.Supported(contentType) {
 			writeError(w, 415, "unsupported_avatar_type")
 			return
 		}
@@ -58,7 +58,22 @@ func registerAvatars(mux *http.ServeMux, d Dependencies) {
 			}
 			return
 		}
-		if int64(len(data)) != r.ContentLength || !validAvatarImage(data, contentType) {
+		if int64(len(data)) != r.ContentLength {
+			writeError(w, 400, "invalid_image")
+			return
+		}
+		storedData, storedType := data, contentType
+		if contentType != "image/jpeg" && contentType != "image/png" {
+			convertCtx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+			converted, convertErr := imaging.ConvertBytesToPNG(convertCtx, data, contentType, 512)
+			cancel()
+			if convertErr != nil {
+				writeError(w, 400, "invalid_image")
+				return
+			}
+			storedData, storedType = converted, "image/png"
+		}
+		if !validAvatarImage(storedData, storedType) {
 			writeError(w, 400, "invalid_image")
 			return
 		}
@@ -66,7 +81,7 @@ func registerAvatars(mux *http.ServeMux, d Dependencies) {
 		if quota <= 0 {
 			quota = 10 << 30
 		}
-		if int64(len(data)) > quota {
+		if int64(len(storedData)) > quota {
 			writeError(w, 413, "quota_exceeded")
 			return
 		}
@@ -86,7 +101,7 @@ func registerAvatars(mux *http.ServeMux, d Dependencies) {
 				}
 			}
 		}()
-		if err := d.Objects.Put(r.Context(), key, bytes.NewReader(data), int64(len(data)), contentType); err != nil {
+		if err := d.Objects.Put(r.Context(), key, bytes.NewReader(storedData), int64(len(storedData)), storedType); err != nil {
 			writeError(w, 502, "upload_failed")
 			return
 		}
@@ -107,11 +122,11 @@ func registerAvatars(mux *http.ServeMux, d Dependencies) {
 			writeError(w, 500, "internal")
 			return
 		}
-		if usedOther > quota-int64(len(data)) {
+		if usedOther > quota-int64(len(storedData)) {
 			writeError(w, 413, "quota_exceeded")
 			return
 		}
-		if _, err := tx.Exec(r.Context(), `UPDATE users SET avatar_key=$2,avatar_content_type=$3,avatar_size_bytes=$4 WHERE id=$1`, p.UserID, key, contentType, len(data)); err != nil {
+		if _, err := tx.Exec(r.Context(), `UPDATE users SET avatar_key=$2,avatar_content_type=$3,avatar_size_bytes=$4 WHERE id=$1`, p.UserID, key, storedType, len(storedData)); err != nil {
 			writeError(w, 500, "internal")
 			return
 		}

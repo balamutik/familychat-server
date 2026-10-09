@@ -5,7 +5,7 @@ info:
   description: |
     All chat, call and private file operations require an opaque Bearer session token.
     Chat file bytes are served only by this API after a current chat membership check.
-    Current JPEG/PNG user avatars are the sole public file exception and are streamed by the API without exposing S3.
+    Current JPEG/PNG user avatars are the sole public file exception and are streamed by the API without exposing S3. Other common image uploads are normalized to PNG avatars.
     WebSocket upgrade uses a single-use ticket rather than the Bearer token in the URL.
 servers:
   - url: /api/v1
@@ -46,6 +46,13 @@ components:
     UUID:
       type: string
       format: uuid
+    PushDeviceInput:
+      type: object
+      required: [client_server_id]
+      properties:
+        client_server_id: {$ref: '#/components/schemas/UUID'}
+        alert_token: {type: string, pattern: '^[a-fA-F0-9]{64,256}$'}
+        voip_token: {type: string, pattern: '^[a-fA-F0-9]{64,256}$'}
     Error:
       type: object
       required: [error]
@@ -197,6 +204,23 @@ paths:
     post:
       summary: Revoke the current session
       responses: {'204': {description: Logged out}}
+  /push/devices/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: {$ref: '#/components/schemas/UUID'}
+    put:
+      summary: Register this session's APNs alert and VoIP tokens
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/PushDeviceInput'}
+      responses: {'204': {description: Registered}, '400': {description: Invalid token}, '401': {description: Unauthorized}}
+    delete:
+      summary: Remove this session's device registration
+      responses: {'204': {description: Removed}, '401': {description: Unauthorized}}
   /auth/change-password:
     post:
       summary: Change password and revoke active sessions
@@ -221,13 +245,22 @@ paths:
       responses: {'201': {description: Ticket}}
   /users/me/avatar:
     put:
-      summary: Replace own avatar with validated JPEG or PNG bytes
-      description: Raw body with Content-Length; limit is min(5 MiB, configured max_file_bytes, server ceiling). The current avatar persists until replaced or deleted.
+      summary: Replace own avatar with a validated common image format
+      description: Raw JPEG, PNG, APNG, GIF, WebP, HEIC, HEIF, AVIF, BMP, TIFF, ICO or SVG bytes with Content-Length; limit is min(5 MiB, configured max_file_bytes, server ceiling). Formats other than JPEG/PNG are normalized to PNG. The current avatar persists until replaced or deleted.
       requestBody:
         required: true
         content:
           image/jpeg: {schema: {type: string, format: binary}}
           image/png: {schema: {type: string, format: binary}}
+          image/gif: {schema: {type: string, format: binary}}
+          image/webp: {schema: {type: string, format: binary}}
+          image/heic: {schema: {type: string, format: binary}}
+          image/heif: {schema: {type: string, format: binary}}
+          image/avif: {schema: {type: string, format: binary}}
+          image/bmp: {schema: {type: string, format: binary}}
+          image/tiff: {schema: {type: string, format: binary}}
+          image/x-icon: {schema: {type: string, format: binary}}
+          image/svg+xml: {schema: {type: string, format: binary}}
       responses: {'200': {description: 'avatar_url'}, '400': {description: Invalid image}, '413': {description: Too large}, '415': {description: Unsupported type}}
     delete:
       summary: Remove own avatar
@@ -484,7 +517,7 @@ paths:
     parameters: [{$ref: '#/components/parameters/FileID'}]
     get:
       summary: Authorized generated preview; supports Range
-      responses: {'200': {description: JPEG preview}, '404': {description: Unavailable}}
+      responses: {'200': {description: PNG preview for images or JPEG preview for video}, '404': {description: Unavailable}}
     head:
       summary: Authorized preview headers
       responses: {'200': {description: Headers}}

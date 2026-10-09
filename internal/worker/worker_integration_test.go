@@ -64,7 +64,7 @@ func TestPreviewAndCleanup(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		_ = store.Delete(context.Background(), key)
-		_ = store.Delete(context.Background(), "previews/"+fileID+".jpg")
+		_ = store.Delete(context.Background(), "previews/"+fileID+".png")
 	})
 	err = db.QueryRow(ctx, `INSERT INTO attachments(chat_id,uploader_id,object_key,filename,content_type,size_bytes) VALUES($1,$2,$3,'image.png','image/png',$4) RETURNING id::text`, chatID, userID, key, buf.Len()).Scan(&fileID)
 	if err != nil {
@@ -90,7 +90,7 @@ func TestPreviewAndCleanup(t *testing.T) {
 	if state != "ready" {
 		t.Fatalf("state=%s key=%s err=%v", state, previewKey, err)
 	}
-	if meta, err := store.Head(ctx, previewKey); err != nil || meta.ContentType != "image/jpeg" || meta.Size == 0 {
+	if meta, err := store.Head(ctx, previewKey); err != nil || meta.ContentType != "image/png" || meta.Size == 0 {
 		t.Fatalf("preview object=%+v err=%v", meta, err)
 	}
 	videoFile, err := os.CreateTemp("", "familychat-video-*.mp4")

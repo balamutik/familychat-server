@@ -14,7 +14,7 @@ COPY internal ./internal
 RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/familychat ./cmd/familychat
 
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg && rm -rf /var/lib/apt/lists/* && useradd --uid 10001 --create-home familychat
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates ffmpeg libheif-examples librsvg2-bin && rm -rf /var/lib/apt/lists/* && useradd --uid 10001 --create-home familychat
 COPY --from=go-build /out/familychat /usr/local/bin/familychat
 COPY --from=admin-build /src/admin/dist /app/admin
 ENV ADMIN_STATIC_DIR=/app/admin

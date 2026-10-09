@@ -41,13 +41,18 @@ services:
       USER_QUOTA_BYTES: ${USER_QUOTA_BYTES:-10737418240}
       TURN_URL: ${TURN_URL:?set TURN_URL}
       TURN_SECRET: ${TURN_SECRET:?set TURN_SECRET}
+      APNS_KEY_FILE: ${APNS_KEY_FILE:+/run/secrets/apns_key}
+      APNS_KEY_ID: ${APNS_KEY_ID:-}
+      APNS_TEAM_ID: ${APNS_TEAM_ID:-}
+      APNS_TOPIC: ${APNS_TOPIC:-}
+      APNS_SANDBOX: ${APNS_SANDBOX:-true}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-localhost}
       ADMIN_LOGIN: ${ADMIN_LOGIN:-admin}
       ADMIN_PASSWORD_FILE: /run/secrets/admin_password
     secrets:
       - admin_password
     ports:
-      - "127.0.0.1:8080:8080"
+      - "${API_BIND_HOST:-127.0.0.1}:8080:8080"
     depends_on:
       postgres: {condition: service_healthy}
       s3: {condition: service_started}
@@ -62,6 +67,8 @@ services:
     build: .
     command: ["worker"]
     environment: *server_env
+    volumes:
+      - ${APNS_KEY_FILE:-/dev/null}:/run/secrets/apns_key:ro
     depends_on:
       postgres: {condition: service_healthy}
       s3: {condition: service_started}

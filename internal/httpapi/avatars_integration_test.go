@@ -10,6 +10,9 @@ import (
 	"image/jpeg"
 	"image/png"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -56,8 +59,9 @@ func TestAvatarUploadPublicReadReplaceAndDelete(t *testing.T) {
 		status                   int
 	}{
 		{"anonymous upload", "", "image/png", pngBytes.Bytes(), 401},
-		{"svg", ownerToken, "image/svg+xml", []byte(`<svg/>`), 415},
-		{"gif", ownerToken, "image/gif", []byte("GIF89a"), 415},
+		{"HTML", ownerToken, "text/html", []byte(`<html/>`), 415},
+		{"invalid SVG", ownerToken, "image/svg+xml", []byte(`<html/>`), 400},
+		{"invalid gif", ownerToken, "image/gif", []byte("GIF89a"), 400},
 		{"spoofed image", ownerToken, "image/png", []byte("not an image"), 400},
 		{"wrong MIME", ownerToken, "image/jpeg", pngBytes.Bytes(), 400},
 	} {
@@ -161,6 +165,80 @@ func TestAvatarUploadPublicReadReplaceAndDelete(t *testing.T) {
 	}
 	if r := callAPI(h, "DELETE", "/api/v1/users/me/avatar", "", ownerToken); r.Code != 204 {
 		t.Fatalf("repeat delete: %d", r.Code)
+	}
+}
+
+func TestCommonImageFormatsBecomePublicPNGAvatars(t *testing.T) {
+	endpoint := testS3Endpoint(t)
+	pool := testDatabase(t)
+	userID, token := seedSession(t, pool, "user")
+	store := objects.New(config.Config{S3Endpoint: endpoint, S3Region: "us-east-1", S3Bucket: "familychat-test", S3AccessKey: "familychat_test", S3SecretKey: "familychat_test_secret", S3UsePathStyle: true})
+	h := New(Dependencies{DB: pool, Auth: &auth.Service{DB: pool, TTL: time.Hour}, Objects: store})
+	url := "/api/v1/users/" + userID + "/avatar"
+	var keys []string
+	t.Cleanup(func() {
+		for _, key := range keys {
+			_ = store.Delete(context.Background(), key)
+			_, _ = pool.Exec(context.Background(), `DELETE FROM avatar_gc WHERE object_key=$1`, key)
+		}
+	})
+	for _, tc := range []struct {
+		name, filename, contentType, dependency string
+	}{
+		{"GIF", "sample.gif", "image/gif", ""},
+		{"WebP", "sample.webp", "image/webp", ""},
+		{"HEIC", "sample.heic", "image/heic", "heif-convert"},
+		{"HEIF", "sample.heic", "image/heif", "heif-convert"},
+		{"AVIF", "sample.avif", "image/avif", ""},
+		{"BMP", "sample.bmp", "image/bmp", ""},
+		{"TIFF", "sample.tiff", "image/tiff", ""},
+		{"ICO", "sample.ico", "image/x-icon", ""},
+		{"SVG", "sample.svg", "image/svg+xml", "rsvg-convert"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.dependency != "" {
+				if _, err := exec.LookPath(tc.dependency); err != nil {
+					t.Skipf("%s unavailable", tc.dependency)
+				}
+			}
+			data, err := os.ReadFile(filepath.Join("..", "imaging", "testdata", tc.filename))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r := httptest.NewRequest("PUT", "/api/v1/users/me/avatar", bytes.NewReader(data))
+			r.Header.Set("Authorization", "Bearer "+token)
+			r.Header.Set("Content-Type", tc.contentType)
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != 200 {
+				t.Fatalf("upload %s: %d %s", tc.name, w.Code, w.Body.String())
+			}
+			var key string
+			if err := pool.QueryRow(t.Context(), `SELECT avatar_key FROM users WHERE id=$1`, userID).Scan(&key); err != nil {
+				t.Fatal(err)
+			}
+			keys = append(keys, key)
+			avatar := callAPI(h, "GET", url, "", "")
+			if avatar.Code != 200 || avatar.Header().Get("Content-Type") != "image/png" {
+				t.Fatalf("public avatar %s: %d %q", tc.name, avatar.Code, avatar.Header().Get("Content-Type"))
+			}
+			config, err := png.DecodeConfig(bytes.NewReader(avatar.Body.Bytes()))
+			if err != nil || config.Width < 1 || config.Height < 1 || config.Width > 512 || config.Height > 512 {
+				t.Fatalf("avatar PNG %s: dimensions=%+v error=%v", tc.name, config, err)
+			}
+		})
+	}
+	pngBytes, err := os.ReadFile(filepath.Join("..", "imaging", "testdata", "sample.png"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest("PUT", "/api/v1/users/me/avatar", bytes.NewReader(pngBytes))
+	r.Header.Set("Authorization", "Bearer "+token)
+	r.Header.Set("Content-Type", "image/heic")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != 400 {
+		t.Fatalf("spoofed HEIC accepted: %d %s", w.Code, w.Body.String())
 	}
 }
 

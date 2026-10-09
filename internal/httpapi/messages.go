@@ -159,6 +159,18 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 			writeError(w, 500, "internal")
 			return
 		}
+		if d.PushEnabled {
+			_, err = tx.Exec(r.Context(), `INSERT INTO push_jobs(device_id,kind,payload)
+			SELECT d.id,'alert',jsonb_build_object('aps',jsonb_build_object('alert',jsonb_build_object('title','FamilyChat','body','Новое сообщение'),'sound','default'),
+			'server_id',d.client_server_id::text,'chat_id',$1::text,'message_id',$2::text)
+			FROM push_devices d JOIN chat_members cm ON cm.user_id=d.user_id JOIN sessions s ON s.id=d.session_id
+			WHERE cm.chat_id=$1::uuid AND d.user_id<>$3 AND d.alert_token IS NOT NULL
+			AND s.revoked_at IS NULL AND s.expires_at>now()`, chatID, v.ID, p.UserID)
+		}
+		if err != nil {
+			writeError(w, 500, "internal")
+			return
+		}
 		if err = tx.Commit(r.Context()); err != nil {
 			writeError(w, 500, "internal")
 			return

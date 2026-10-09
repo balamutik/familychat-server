@@ -2,14 +2,17 @@ package worker
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"familychat/server/internal/imaging"
 	"familychat/server/internal/objects"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -21,10 +24,15 @@ type Store interface {
 	Delete(context.Context, string) error
 }
 
+type PushSender interface {
+	Send(context.Context, string, string, json.RawMessage) (bool, error)
+}
+
 type Worker struct {
 	DB      *pgxpool.Pool
 	Objects Store
 	FFmpeg  string
+	Push    PushSender
 }
 
 type job struct {
@@ -51,6 +59,17 @@ func (w *Worker) Run(ctx context.Context) error {
 }
 
 func (w *Worker) Once(ctx context.Context) error {
+	if w.Push != nil {
+		for i := 0; i < 10; i++ {
+			more, err := w.sendPush(ctx)
+			if err != nil {
+				return err
+			}
+			if !more {
+				break
+			}
+		}
+	}
 	if err := w.cleanup(ctx); err != nil {
 		return err
 	}
@@ -136,16 +155,107 @@ func (w *Worker) Once(ctx context.Context) error {
 	return nil
 }
 
+func (w *Worker) sendPush(ctx context.Context) (bool, error) {
+	tx, err := w.DB.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	var id int64
+	var token, kind, sessionID string
+	var payload json.RawMessage
+	var attempts int
+	err = tx.QueryRow(ctx, `SELECT j.id,CASE WHEN j.kind='voip' THEN d.voip_token ELSE d.alert_token END,
+		j.kind,j.payload,j.attempts,d.session_id::text FROM push_jobs j JOIN push_devices d ON d.id=j.device_id
+		WHERE j.available_at<=now() AND (j.claimed_until IS NULL OR j.claimed_until<now())
+		ORDER BY CASE WHEN j.kind='voip' THEN 0 ELSE 1 END,j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1`).Scan(&id, &token, &kind, &payload, &attempts, &sessionID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if _, err = tx.Exec(ctx, `UPDATE push_jobs SET claimed_until=now()+interval '30 seconds',attempts=attempts+1 WHERE id=$1`, id); err != nil {
+		return false, err
+	}
+	if err = tx.Commit(ctx); err != nil {
+		return false, err
+	}
+	var live bool
+	if err = w.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM sessions WHERE id=$1 AND revoked_at IS NULL AND expires_at>now())`, sessionID).Scan(&live); err != nil {
+		return false, err
+	}
+	if kind == "voip" {
+		var data struct {
+			CallID string `json:"call_id"`
+		}
+		if err = json.Unmarshal(payload, &data); err != nil {
+			live = false
+		} else {
+			var ringing bool
+			if err = w.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM calls WHERE id=$1 AND state='ringing' AND created_at>now()-interval '45 seconds')`, data.CallID).Scan(&ringing); err != nil {
+				return false, err
+			}
+			live = live && ringing
+		}
+	}
+	if !live || token == "" {
+		_, err = w.DB.Exec(ctx, `DELETE FROM push_jobs WHERE id=$1`, id)
+		return true, err
+	}
+	sendCtx, cancel := context.WithTimeout(ctx, 12*time.Second)
+	invalid, sendErr := w.Push.Send(sendCtx, token, kind, payload)
+	cancel()
+	if sendErr != nil {
+		log.Printf("push delivery failed (%s, attempt %d): %v", kind, attempts+1, sendErr)
+	}
+	if invalid {
+		cleanup, beginErr := w.DB.Begin(ctx)
+		if beginErr != nil {
+			return false, beginErr
+		}
+		defer cleanup.Rollback(ctx)
+		if kind == "voip" {
+			_, err = cleanup.Exec(ctx, `DELETE FROM push_devices WHERE id=(SELECT device_id FROM push_jobs WHERE id=$1) AND alert_token IS NULL`, id)
+			if err != nil {
+				return false, err
+			}
+			_, err = cleanup.Exec(ctx, `UPDATE push_devices SET voip_token=NULL WHERE id=(SELECT device_id FROM push_jobs WHERE id=$1) AND alert_token IS NOT NULL`, id)
+		} else {
+			_, err = cleanup.Exec(ctx, `DELETE FROM push_devices WHERE id=(SELECT device_id FROM push_jobs WHERE id=$1) AND voip_token IS NULL`, id)
+			if err != nil {
+				return false, err
+			}
+			_, err = cleanup.Exec(ctx, `UPDATE push_devices SET alert_token=NULL WHERE id=(SELECT device_id FROM push_jobs WHERE id=$1) AND voip_token IS NOT NULL`, id)
+		}
+		if err != nil {
+			return false, err
+		}
+		_, err = cleanup.Exec(ctx, `DELETE FROM push_jobs WHERE id=$1`, id)
+		if err != nil {
+			return false, err
+		}
+		return true, cleanup.Commit(ctx)
+	}
+	if sendErr == nil || attempts >= 4 {
+		_, err = w.DB.Exec(ctx, `DELETE FROM push_jobs WHERE id=$1`, id)
+		return true, err
+	}
+	_, err = w.DB.Exec(ctx, `UPDATE push_jobs SET claimed_until=NULL,available_at=now()+($2::int * interval '30 seconds') WHERE id=$1`, id, attempts+1)
+	return true, err
+}
+
 func (w *Worker) makePreview(ctx context.Context, j job) (string, string) {
 	ffmpeg := w.FFmpeg
 	if ffmpeg == "" {
 		ffmpeg = "ffmpeg"
 	}
-	ctype := strings.ToLower(strings.Split(j.ContentType, ";")[0])
-	if !strings.HasPrefix(ctype, "image/") && !strings.HasPrefix(ctype, "video/") {
+	ctype := imaging.MediaType(j.ContentType)
+	isImage := strings.HasPrefix(ctype, "image/")
+	if !isImage && !strings.HasPrefix(ctype, "video/") {
 		return "unsupported", ""
 	}
-	if ctype == "image/svg+xml" {
+	if isImage && !imaging.Supported(ctype) {
 		return "unsupported", ""
 	}
 	ctx, cancel := context.WithTimeout(ctx, 90*time.Second)
@@ -165,15 +275,25 @@ func (w *Worker) makePreview(ctx context.Context, j job) (string, string) {
 	if err != nil {
 		return "failed", ""
 	}
-	out, err := os.CreateTemp("", "familychat-preview-*.jpg")
+	extension, previewType := ".jpg", "image/jpeg"
+	if isImage {
+		extension, previewType = ".png", "image/png"
+	}
+	out, err := os.CreateTemp("", "familychat-preview-*"+extension)
 	if err != nil {
 		return "failed", ""
 	}
 	out.Close()
 	defer os.Remove(out.Name())
-	cmd := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-v", "error", "-y", "-i", in.Name(), "-frames:v", "1", "-vf", "scale=640:640:force_original_aspect_ratio=decrease", "-q:v", "4", out.Name())
-	if err = cmd.Run(); err != nil {
-		return "failed", ""
+	if isImage {
+		if err = imaging.ConvertFileToPNG(ctx, in.Name(), out.Name(), ctype, 640, ffmpeg); err != nil {
+			return "failed", ""
+		}
+	} else {
+		cmd := exec.CommandContext(ctx, ffmpeg, "-nostdin", "-v", "error", "-y", "-i", in.Name(), "-frames:v", "1", "-vf", "scale=640:640:force_original_aspect_ratio=decrease", "-q:v", "4", out.Name())
+		if err = cmd.Run(); err != nil {
+			return "failed", ""
+		}
 	}
 	stat, err := os.Stat(out.Name())
 	if err != nil || stat.Size() == 0 || stat.Size() > 5<<20 {
@@ -184,14 +304,17 @@ func (w *Worker) makePreview(ctx context.Context, j job) (string, string) {
 		return "failed", ""
 	}
 	defer f.Close()
-	key := filepath.ToSlash("previews/" + j.AttachmentID + ".jpg")
-	if err = w.Objects.Put(ctx, key, f, stat.Size(), "image/jpeg"); err != nil {
+	key := filepath.ToSlash("previews/" + j.AttachmentID + extension)
+	if err = w.Objects.Put(ctx, key, f, stat.Size(), previewType); err != nil {
 		return "failed", ""
 	}
 	return "ready", key
 }
 
 func (w *Worker) cleanup(ctx context.Context) error {
+	if _, err := w.DB.Exec(ctx, `DELETE FROM push_jobs WHERE created_at<now()-interval '1 day'`); err != nil {
+		return err
+	}
 	rows, err := w.DB.Query(ctx, `UPDATE upload_reservations SET state='failed' WHERE state='uploading' AND expires_at<now() RETURNING object_key`)
 	if err != nil {
 		return err

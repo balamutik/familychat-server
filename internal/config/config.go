@@ -20,6 +20,11 @@ type Config struct {
 	S3UsePathStyle bool
 	TurnURL        string
 	TurnSecret     string
+	APNsKeyFile    string
+	APNsKeyID      string
+	APNsTeamID     string
+	APNsTopic      string
+	APNsSandbox    bool
 	AllowedOrigins []string
 	SessionTTL     time.Duration
 	MaxFileBytes   int64
@@ -37,6 +42,10 @@ func Load() (Config, error) {
 		S3SecretKey:    os.Getenv("S3_SECRET_KEY"),
 		TurnURL:        os.Getenv("TURN_URL"),
 		TurnSecret:     os.Getenv("TURN_SECRET"),
+		APNsKeyFile:    os.Getenv("APNS_KEY_FILE"),
+		APNsKeyID:      os.Getenv("APNS_KEY_ID"),
+		APNsTeamID:     os.Getenv("APNS_TEAM_ID"),
+		APNsTopic:      os.Getenv("APNS_TOPIC"),
 		SessionTTL:     30 * 24 * time.Hour,
 		MaxFileBytes:   250 << 20,
 		UserQuotaBytes: 10 << 30,
@@ -69,6 +78,22 @@ func Load() (Config, error) {
 			return c, errors.New("S3_USE_PATH_STYLE must be boolean")
 		}
 		c.S3UsePathStyle = b
+	}
+	if v := os.Getenv("APNS_SANDBOX"); v != "" {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			return c, errors.New("APNS_SANDBOX must be boolean")
+		}
+		c.APNsSandbox = b
+	}
+	configured := 0
+	for _, v := range []string{c.APNsKeyFile, c.APNsKeyID, c.APNsTeamID, c.APNsTopic} {
+		if v != "" {
+			configured++
+		}
+	}
+	if configured != 0 && configured != 4 {
+		return c, errors.New("APNS_KEY_FILE, APNS_KEY_ID, APNS_TEAM_ID and APNS_TOPIC must be set together")
 	}
 	for _, origin := range strings.Split(os.Getenv("ALLOWED_ORIGINS"), ",") {
 		if origin = strings.TrimSpace(origin); origin != "" {

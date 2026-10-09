@@ -31,6 +31,7 @@ type Dependencies struct {
 	AllowedOrigins []string
 	TurnURL        string
 	TurnSecret     string
+	PushEnabled    bool
 	AdminStaticDir string
 }
 
@@ -60,6 +61,7 @@ func New(deps Dependencies) http.Handler {
 	registerFiles(mux, deps)
 	registerWebsocket(mux, deps)
 	registerCalls(mux, deps)
+	registerPushDevices(mux, deps)
 	registerAdminUI(mux, deps.AdminStaticDir)
 	return mux
 }
