@@ -41,6 +41,28 @@ components:
       scheme: bearer
       description: Непрозрачный токен из POST /auth/login; передавать в заголовке, не в URL.
   schemas:
+    CallHistoryEntry:
+      type: object
+      required: [id, chat_id, peer_id, peer_name, kind, direction, outcome, created_at, can_redial]
+      properties:
+        id: {type: string, format: uuid}
+        chat_id: {type: string, format: uuid}
+        peer_id: {type: string, format: uuid}
+        peer_name: {type: string}
+        peer_avatar_url: {type: [string, 'null']}
+        kind: {type: string, enum: [audio, video]}
+        direction: {type: string, enum: [incoming, outgoing]}
+        outcome: {type: string, enum: [completed, missed, rejected, cancelled, failed, unknown]}
+        created_at: {type: string, format: date-time}
+        connected_at: {type: [string, 'null'], format: date-time}
+        ended_at: {type: [string, 'null'], format: date-time}
+        can_redial: {type: boolean}
+    CallHistoryPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/CallHistoryEntry'}}
+        next_cursor: {type: [string, 'null'], format: uuid}
     UUID:
       type: string
       format: uuid
@@ -241,6 +263,7 @@ components:
       additionalProperties: false
       required: [kind]
       properties:
+        media_tracking: {type: boolean, default: false, description: 'Клиент отправляет POST /calls/{id}/connected после установления медиасоединения.'}
         kind: {type: string, enum: [audio, video]}
     Call:
       type: object
@@ -1172,6 +1195,32 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
+  /calls:
+    get:
+      summary: История завершённых звонков текущего пользователя
+      description: Только доступные личные чаты; новые первыми, до 50 записей. completed означает подтверждённое медиасоединение; unknown используется для старых клиентов без такой телеметрии.
+      parameters:
+        - name: before
+          in: query
+          schema: {type: string, format: uuid}
+          description: next_cursor предыдущей страницы.
+      responses:
+        '200':
+          description: История вызовов.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/CallHistoryPage'}
+        '400': {description: Неверный курсор.}
+        '401': {description: Требуется авторизация.}
+  /calls/{id}/connected:
+    post:
+      summary: Устройство участника подтверждает установленное медиасоединение
+      description: Идемпотентно; только сессии звонящего и ответившего устройства. Допускается сразу после завершения звонка при задержке сети.
+      parameters: [{$ref: '#/components/parameters/CallID'}]
+      responses:
+        '204': {description: Соединение зафиксировано.}
+        '404': {description: Звонок или сессия недоступны.}
+        '409': {description: Звонок ещё не принят.}
   /calls/{id}:
     get:
       tags: [Calls]

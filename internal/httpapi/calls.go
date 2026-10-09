@@ -25,10 +25,12 @@ type callView struct {
 }
 
 func registerCalls(mux *http.ServeMux, d Dependencies) {
+	registerCallHistory(mux, d)
 	protected := func(pattern string, fn http.HandlerFunc) { mux.Handle(pattern, require(d.Auth, fn)) }
 	protected("POST /api/v1/chats/{id}/calls", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
-			Kind string `json:"kind"`
+			Kind          string `json:"kind"`
+			MediaTracking bool   `json:"media_tracking"`
 		}
 		if !decodeJSON(w, r, &body) {
 			return
@@ -82,7 +84,7 @@ func registerCalls(mux *http.ServeMux, d Dependencies) {
 		}
 		var call callView
 		call.ChatID, call.CallerID, call.CalleeID, call.Kind, call.State = chatID, p.UserID, calleeID, body.Kind, "ringing"
-		err = tx.QueryRow(r.Context(), `INSERT INTO calls(chat_id,caller_id,callee_id,caller_session_id,kind,state) VALUES($1,$2,$3,$4,$5,'ringing') RETURNING id::text,created_at`, chatID, p.UserID, calleeID, p.SessionID, body.Kind).Scan(&call.ID, &call.CreatedAt)
+		err = tx.QueryRow(r.Context(), `INSERT INTO calls(chat_id,caller_id,callee_id,caller_session_id,kind,state,media_tracking) VALUES($1,$2,$3,$4,$5,'ringing',$6) RETURNING id::text,created_at`, chatID, p.UserID, calleeID, p.SessionID, body.Kind, body.MediaTracking).Scan(&call.ID, &call.CreatedAt)
 		if err != nil {
 			writeError(w, 500, "internal")
 			return
