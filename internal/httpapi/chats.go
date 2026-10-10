@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"familychat/server/internal/auth"
 	"github.com/jackc/pgx/v5"
@@ -14,7 +15,15 @@ var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]
 
 func validUUID(id string) bool { return uuidPattern.MatchString(id) }
 
+type peerPresence struct {
+	Online     bool       `json:"online"`
+	LastSeenAt *time.Time `json:"last_seen_at"`
+}
+
 type chatView struct {
+	Presence           *peerPresence `json:"presence,omitempty"`
+	peerID             string
+	peerDisabled       bool
 	ID                 string  `json:"id"`
 	Kind               string  `json:"kind"`
 	Title              string  `json:"title"`
@@ -24,6 +33,14 @@ type chatView struct {
 	LastMessagePreview *string `json:"last_message_preview,omitempty"`
 	LastMessageAt      *string `json:"last_message_at,omitempty"`
 	LastMessageSender  *string `json:"last_message_sender,omitempty"`
+}
+
+func (v *chatView) setPresence(d Dependencies, lastSeen *time.Time) {
+	if v.Kind != "direct" {
+		return
+	}
+	v.Presence = &peerPresence{LastSeenAt: lastSeen,
+		Online: !v.peerDisabled && d.Events != nil && d.Events.HasUser(v.peerID)}
 }
 
 func registerChats(mux *http.ServeMux, d Dependencies) {
@@ -43,7 +60,8 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		var active bool
 		var peerLogin string
 		var peerHasAvatar bool
-		if err := d.DB.QueryRow(r.Context(), `SELECT NOT disabled,login,avatar_key IS NOT NULL FROM users WHERE id=$1`, body.UserID).Scan(&active, &peerLogin, &peerHasAvatar); err != nil || !active {
+		var peerLastSeen *time.Time
+		if err := d.DB.QueryRow(r.Context(), `SELECT NOT disabled,login,avatar_key IS NOT NULL,last_seen_at FROM users WHERE id=$1`, body.UserID).Scan(&active, &peerLogin, &peerHasAvatar, &peerLastSeen); err != nil || !active {
 			writeError(w, 404, "not_found")
 			return
 		}
@@ -83,7 +101,8 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		if created {
 			status = 201
 		}
-		v := chatView{ID: id, Kind: "direct", Title: peerLogin, Role: "member"}
+		v := chatView{ID: id, Kind: "direct", Title: peerLogin, Role: "member", peerID: body.UserID}
+		v.setPresence(d, peerLastSeen)
 		if peerHasAvatar {
 			v.AvatarURL = avatarURL(body.UserID)
 		}
@@ -135,7 +154,7 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		rows, err := d.DB.Query(r.Context(), `SELECT c.id::text,c.kind,CASE WHEN c.kind='direct' THEN peer.login ELSE c.title END,m.role,
 			CASE WHEN peer.avatar_key IS NOT NULL AND NOT peer.disabled THEN '/api/v1/users/'||peer.id::text||'/avatar' ELSE '' END,
 			(SELECT count(*) FROM messages msg WHERE msg.chat_id=c.id AND msg.seq>m.read_seq AND msg.sender_id<>$1),
-			recent.preview,recent.created_at,recent.sender_login
+			recent.preview,recent.created_at,recent.sender_login,COALESCE(peer.id::text,''),COALESCE(peer.disabled,false),peer.last_seen_at
 			FROM chats c JOIN chat_members m ON m.chat_id=c.id
 			LEFT JOIN users peer ON peer.id=CASE WHEN c.kind='direct' THEN CASE WHEN c.direct_user_low=$1 THEN c.direct_user_high ELSE c.direct_user_low END ELSE NULL END
 			LEFT JOIN LATERAL (SELECT COALESCE(NULLIF(LEFT(BTRIM(msg.body),160),''),
@@ -151,11 +170,13 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		list := []chatView{}
 		for rows.Next() {
 			var v chatView
+			var lastSeen *time.Time
 			if err := rows.Scan(&v.ID, &v.Kind, &v.Title, &v.Role, &v.AvatarURL, &v.UnreadCount,
-				&v.LastMessagePreview, &v.LastMessageAt, &v.LastMessageSender); err != nil {
+				&v.LastMessagePreview, &v.LastMessageAt, &v.LastMessageSender, &v.peerID, &v.peerDisabled, &lastSeen); err != nil {
 				writeError(w, 500, "internal")
 				return
 			}
+			v.setPresence(d, lastSeen)
 			list = append(list, v)
 		}
 		if rows.Err() != nil {
@@ -172,10 +193,11 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		}
 		p, _ := auth.PrincipalFrom(r.Context())
 		var v chatView
+		var lastSeen *time.Time
 		err := d.DB.QueryRow(r.Context(), `SELECT c.id::text,c.kind,CASE WHEN c.kind='direct' THEN peer.login ELSE c.title END,m.role,
 			CASE WHEN peer.avatar_key IS NOT NULL AND NOT peer.disabled THEN '/api/v1/users/'||peer.id::text||'/avatar' ELSE '' END,
 			(SELECT count(*) FROM messages msg WHERE msg.chat_id=c.id AND msg.seq>m.read_seq AND msg.sender_id<>$2),
-			recent.preview,recent.created_at,recent.sender_login
+			recent.preview,recent.created_at,recent.sender_login,COALESCE(peer.id::text,''),COALESCE(peer.disabled,false),peer.last_seen_at
 			FROM chats c JOIN chat_members m ON m.chat_id=c.id
 			LEFT JOIN users peer ON peer.id=CASE WHEN c.kind='direct' THEN CASE WHEN c.direct_user_low=$2 THEN c.direct_user_high ELSE c.direct_user_low END ELSE NULL END
 			LEFT JOIN LATERAL (SELECT COALESCE(NULLIF(LEFT(BTRIM(msg.body),160),''),
@@ -183,11 +205,12 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 				'Вложение') AS preview,msg.created_at::text AS created_at,sender.login AS sender_login
 				FROM messages msg JOIN users sender ON sender.id=msg.sender_id WHERE msg.chat_id=c.id ORDER BY msg.seq DESC LIMIT 1) recent ON true
 			WHERE c.id=$1 AND m.user_id=$2 AND c.deleted_at IS NULL`, id, p.UserID).Scan(&v.ID, &v.Kind, &v.Title, &v.Role, &v.AvatarURL, &v.UnreadCount,
-			&v.LastMessagePreview, &v.LastMessageAt, &v.LastMessageSender)
+			&v.LastMessagePreview, &v.LastMessageAt, &v.LastMessageSender, &v.peerID, &v.peerDisabled, &lastSeen)
 		if err != nil {
 			writeError(w, 404, "not_found")
 			return
 		}
+		v.setPresence(d, lastSeen)
 		writeJSON(w, 200, v)
 	})
 	protected("GET /api/v1/chats/{id}/members", func(w http.ResponseWriter, r *http.Request) {

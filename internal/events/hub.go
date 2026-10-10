@@ -133,6 +133,18 @@ func (h *Hub) SendToSession(sessionID string, payload []byte) bool {
 	return sent
 }
 
+// HasUser counts all live sockets, including multiple devices or windows.
+func (h *Hub) HasUser(userID string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.clients {
+		if c.UserID == userID && c.ctx.Err() == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func (h *Hub) HasSession(sessionID string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()

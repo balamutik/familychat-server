@@ -149,6 +149,18 @@ components:
         last_message_preview: {type: string, description: Первые 160 символов текста последнего сообщения или имя первого вложения; отсутствует в пустом чате.}
         last_message_at: {type: string, format: date-time, description: Время последнего сообщения; отсутствует в пустом чате.}
         last_message_sender: {type: string, description: Логин отправителя последнего сообщения; используется для превью группы.}
+        presence:
+          $ref: '#/components/schemas/UserPresence'
+          description: Присутствие собеседника; только для личного чата. Онлайн означает хотя бы одно активное WebSocket-подключение.
+    UserPresence:
+      type: object
+      required: [online, last_seen_at]
+      properties:
+        online: {type: boolean}
+        last_seen_at:
+          type: [string, 'null']
+          format: date-time
+          description: Последняя подтверждённая активность подключения. null, если подключений ещё не было. Сохраняется между перезапусками.
     Member:
       type: object
       required: [id, login, role]

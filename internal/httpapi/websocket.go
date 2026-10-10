@@ -38,6 +38,7 @@ func registerWebsocket(mux *http.ServeMux, d Dependencies) {
 		}
 		conn.SetReadLimit(64 << 10)
 		client := d.Events.Attach(p.UserID, p.SessionID, conn)
+		recordUserSeen(r.Context(), d, p.UserID)
 		pingDone := make(chan struct{})
 		go func() {
 			ticker := time.NewTicker(25 * time.Second)
@@ -54,6 +55,7 @@ func registerWebsocket(mux *http.ServeMux, d Dependencies) {
 						client.Close()
 						return
 					}
+					recordUserSeen(context.Background(), d, p.UserID)
 				}
 			}
 		}()
@@ -62,6 +64,7 @@ func registerWebsocket(mux *http.ServeMux, d Dependencies) {
 		defer func() {
 			close(pingDone)
 			client.Close()
+			recordUserSeen(context.Background(), d, p.UserID)
 			if d.Events.HasSession(p.SessionID) {
 				return
 			}
@@ -127,4 +130,12 @@ func relaySignal(ctx context.Context, d Dependencies, p auth.Principal, kind, ca
 		return false
 	}
 	return d.Events.SendToSession(target, payload)
+}
+
+// Persist the last confirmed connection activity. Abrupt disconnects are
+// detected by the existing WebSocket ping/pong deadline.
+func recordUserSeen(parent context.Context, d Dependencies, userID string) {
+	ctx, cancel := context.WithTimeout(parent, 3*time.Second)
+	defer cancel()
+	_, _ = d.DB.Exec(ctx, `UPDATE users SET last_seen_at=GREATEST(last_seen_at,now()) WHERE id=$1`, userID)
 }
