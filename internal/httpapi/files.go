@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -18,11 +19,13 @@ import (
 	"unicode/utf8"
 
 	"familychat/server/internal/auth"
+	"familychat/server/internal/contentcrypto"
 )
 
 var rangePattern = regexp.MustCompile(`^bytes=(\d*)-(\d*)$`)
 
 type fileMeta struct {
+	Encrypted    bool   `json:"encrypted"`
 	ID           string `json:"id"`
 	ChatID       string `json:"chat_id"`
 	Filename     string `json:"filename"`
@@ -80,7 +83,21 @@ func registerFiles(mux *http.ServeMux, d Dependencies) {
 			writeError(w, 404, "not_found")
 			return
 		}
+		encrypted := r.Header.Get("X-Content-Encryption") == contentcrypto.Scheme
+		if d.ContentKey != nil && !encrypted {
+			writeError(w, 426, "encryption_required")
+			return
+		}
 		size := r.ContentLength
+		storedSize := size
+		if encrypted {
+			var err error
+			size, err = strconv.ParseInt(r.Header.Get("X-Plaintext-Size"), 10, 64)
+			if err != nil || d.ContentKey == nil || size <= 0 || contentcrypto.StoredSize(size) != storedSize {
+				writeError(w, 400, "invalid_encrypted_content")
+				return
+			}
+		}
 		limit := maxAllowedFileBytes(d)
 		var configuredLimit int64
 		if err := d.DB.QueryRow(r.Context(), `SELECT max_file_bytes FROM settings WHERE singleton=true`).Scan(&configuredLimit); err != nil {
@@ -132,18 +149,18 @@ func registerFiles(mux *http.ServeMux, d Dependencies) {
 			return
 		}
 		var used int64
-		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((SELECT sum(size_bytes) FROM attachments WHERE uploader_id=$1 AND purged_at IS NULL),0)
+		if err = tx.QueryRow(r.Context(), `SELECT COALESCE((SELECT sum(size_bytes + preview_size_bytes + CASE WHEN encrypted THEN 80+16*((size_bytes+1048575)/1048576) ELSE 0 END) FROM attachments WHERE uploader_id=$1 AND purged_at IS NULL),0)
 			+COALESCE((SELECT avatar_size_bytes FROM users WHERE id=$1),0)
 			+COALESCE((SELECT sum(reserved_bytes) FROM upload_reservations WHERE user_id=$1 AND state='uploading' AND expires_at>now()),0)`, p.UserID).Scan(&used); err != nil {
 			writeError(w, 500, "internal")
 			return
 		}
-		if used > quota-size {
+		if used > quota-storedSize {
 			writeError(w, 413, "quota_exceeded")
 			return
 		}
 		var reservationID string
-		if err = tx.QueryRow(r.Context(), `INSERT INTO upload_reservations(user_id,chat_id,object_key,reserved_bytes,state,expires_at) VALUES($1,$2,$3,$4,'uploading',now()+interval '30 minutes') RETURNING id::text`, p.UserID, chatID, key, size).Scan(&reservationID); err != nil {
+		if err = tx.QueryRow(r.Context(), `INSERT INTO upload_reservations(user_id,chat_id,object_key,reserved_bytes,state,expires_at) VALUES($1,$2,$3,$4,'uploading',now()+interval '30 minutes') RETURNING id::text`, p.UserID, chatID, key, storedSize).Scan(&reservationID); err != nil {
 			writeError(w, 500, "internal")
 			return
 		}
@@ -176,18 +193,34 @@ func registerFiles(mux *http.ServeMux, d Dependencies) {
 				_, _ = d.DB.Exec(ctx, `UPDATE upload_reservations SET state='failed' WHERE id=$1 AND state='uploading'`, reservationID)
 			}
 		}()
-		r.Body = http.MaxBytesReader(w, r.Body, limit)
-		if err = d.Objects.Put(r.Context(), key, r.Body, size, contentType); err != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, storedSize)
+		var body io.Reader = r.Body
+		objectType := contentType
+		if encrypted {
+			header := make([]byte, contentcrypto.HeaderSize)
+			if _, err = io.ReadFull(r.Body, header); err != nil {
+				writeError(w, 400, "invalid_encrypted_content")
+				return
+			}
+			n, err := d.ContentKey.HeaderSize(header)
+			if err != nil || n != size {
+				writeError(w, 400, "invalid_encrypted_content")
+				return
+			}
+			body = io.MultiReader(bytes.NewReader(header), r.Body)
+			objectType = "application/octet-stream"
+		}
+		if err = d.Objects.Put(r.Context(), key, body, storedSize, objectType); err != nil {
 			writeError(w, 502, "upload_failed")
 			return
 		}
 		meta, err := d.Objects.Head(r.Context(), key)
-		if err != nil || meta.Size != size {
+		if err != nil || meta.Size != storedSize {
 			writeError(w, 502, "upload_incomplete")
 			return
 		}
 		state := "unsupported"
-		if strings.HasPrefix(contentType, "image/") || strings.HasPrefix(contentType, "video/") {
+		if !encrypted && (strings.HasPrefix(contentType, "image/") || strings.HasPrefix(contentType, "video/")) {
 			state = "pending"
 		}
 		finalTx, err := d.DB.Begin(r.Context())
@@ -206,11 +239,11 @@ func registerFiles(mux *http.ServeMux, d Dependencies) {
 			return
 		}
 		var id string
-		if err = finalTx.QueryRow(r.Context(), `INSERT INTO attachments(chat_id,uploader_id,object_key,filename,content_type,size_bytes,preview_state) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id::text`, chatID, p.UserID, key, filename, contentType, size, state).Scan(&id); err != nil {
+		if err = finalTx.QueryRow(r.Context(), `INSERT INTO attachments(chat_id,uploader_id,object_key,filename,content_type,size_bytes,preview_state,encrypted) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id::text`, chatID, p.UserID, key, filename, contentType, size, state, encrypted).Scan(&id); err != nil {
 			writeError(w, 500, "internal")
 			return
 		}
-		if state == "pending" {
+		if state == "pending" && !encrypted {
 			if _, err = finalTx.Exec(r.Context(), `INSERT INTO preview_jobs(attachment_id) VALUES($1)`, id); err != nil {
 				writeError(w, 500, "internal")
 				return
@@ -225,8 +258,9 @@ func registerFiles(mux *http.ServeMux, d Dependencies) {
 			return
 		}
 		committed = true
-		writeJSON(w, 201, fileMeta{ID: id, ChatID: chatID, Filename: filename, ContentType: contentType, Size: size, PreviewState: state, Available: true})
+		writeJSON(w, 201, fileMeta{Encrypted: encrypted, ID: id, ChatID: chatID, Filename: filename, ContentType: contentType, Size: size, PreviewState: state, Available: true})
 	})
+	protected("PUT /api/v1/files/{id}/preview", func(w http.ResponseWriter, r *http.Request) { uploadEncryptedPreview(w, r, d) })
 	protected("GET /api/v1/files/{id}", func(w http.ResponseWriter, r *http.Request) {
 		p, _ := auth.PrincipalFrom(r.Context())
 		meta, err := authorizedFile(r, d, r.PathValue("id"), p.UserID)
@@ -255,12 +289,12 @@ func authorizedFile(r *http.Request, d Dependencies, id, userID string) (fileMet
 		return fileMeta{}, errors.New("not found")
 	}
 	var m fileMeta
-	err := d.DB.QueryRow(r.Context(), `SELECT a.id::text,a.chat_id::text,a.object_key,COALESCE(a.preview_key,''),a.filename,a.content_type,a.size_bytes,a.preview_state
+	err := d.DB.QueryRow(r.Context(), `SELECT a.id::text,a.chat_id::text,a.object_key,COALESCE(a.preview_key,''),a.filename,a.content_type,a.size_bytes,a.preview_state,a.encrypted
 		FROM attachments a JOIN chats c ON c.id=a.chat_id JOIN chat_members cm ON cm.chat_id=c.id CROSS JOIN settings s
 		WHERE a.id=$1 AND cm.user_id=$2 AND c.deleted_at IS NULL AND
 		a.purged_at IS NULL AND (s.retention_days=0 OR a.created_at>now()-s.retention_days*interval '1 day') AND
 		(EXISTS(SELECT 1 FROM message_attachments ma WHERE ma.attachment_id=a.id)
-		 OR (a.uploader_id=$2 AND NOT EXISTS(SELECT 1 FROM message_attachments ma WHERE ma.attachment_id=a.id)))`, id, userID).Scan(&m.ID, &m.ChatID, &m.ObjectKey, &m.PreviewKey, &m.Filename, &m.ContentType, &m.Size, &m.PreviewState)
+		 OR (a.uploader_id=$2 AND NOT EXISTS(SELECT 1 FROM message_attachments ma WHERE ma.attachment_id=a.id)))`, id, userID).Scan(&m.ID, &m.ChatID, &m.ObjectKey, &m.PreviewKey, &m.Filename, &m.ContentType, &m.Size, &m.PreviewState, &m.Encrypted)
 	m.Available = err == nil
 	return m, err
 }
@@ -309,6 +343,10 @@ func serveFile(w http.ResponseWriter, r *http.Request, d Dependencies, preview b
 		return
 	}
 	key, size, ctype := m.ObjectKey, m.Size, m.ContentType
+	if m.Encrypted {
+		size = contentcrypto.StoredSize(size)
+		ctype = "application/octet-stream"
+	}
 	if preview {
 		if m.PreviewState != "ready" || m.PreviewKey == "" {
 			writeError(w, 404, "not_found")

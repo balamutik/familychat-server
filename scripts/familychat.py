@@ -22,6 +22,7 @@ import urllib.request
 
 REPOSITORY = 'balamutik/familychat-server'
 DEFAULT_ROOT = Path('/opt/familychat')
+COMMAND_PATH = Path('/usr/local/bin/familychat')
 VERSION = re.compile(r'v[0-9]+\.[0-9]+\.[0-9]+')
 
 
@@ -198,14 +199,24 @@ def link_state(root, release):
 
 
 def activate(root, candidate, state):
+    current_manifest = root / 'current' / 'release.json'
+    candidate_manifest = candidate / 'release.json'
+    current_crypto = json.loads(current_manifest.read_text()).get('content_encryption', 0) if current_manifest.exists() else 0
+    candidate_crypto = json.loads(candidate_manifest.read_text()).get('content_encryption', 0) if candidate_manifest.exists() else 0
+    minimum_crypto = max(current_crypto, state.get('content_encryption', 0))
+    if minimum_crypto > candidate_crypto:
+        raise InstallError('Нельзя откатить зашифрованную установку на сервер без поддержки шифрования.')
     link_state(root, candidate)
     compose(root, candidate, state, 'config', '-q')
     compose(root, candidate, state, 'pull')
     state['pending_version'] = candidate.name
+    # Persist before starting a candidate: migration can finish before activation does.
+    state['content_encryption'] = max(minimum_crypto, candidate_crypto)
     save_state(root, state)
+    compose(root, candidate, state, 'stop', 'api', 'worker')
     run(['bash', candidate / 'scripts/deploy-https.sh', 'up', '--host', state['domain'],
          '--letsencrypt', '--email', state['email'], '--no-build'], env=environment(root, state))
-    compose(root, candidate, state, 'up', '-d', '--no-build', '--wait', '--wait-timeout', '180',
+    compose(root, candidate, state, 'up', '-d', '--no-build', '--wait', '--wait-timeout', '86400',
             'api', 'worker', 'turn', 'nginx')
     current = root / 'current'
     pending = root / '.current-next'
@@ -292,9 +303,38 @@ def check_network(domain, public_ip, fresh):
     print('Проверка локальных портов не подтверждает доступность через firewall провайдера.')
 
 
+def install_controller(root, source):
+    # Maintenance code must survive a failed activation of the server release.
+    controller = root / 'manager.py'
+    atomic_write(controller, source.read_text(), 0o700)
+    launcher = '#!/bin/sh\nexec python3 ' + shlex.quote(str(controller)) + ' --root ' + shlex.quote(str(root)) + ' "$@"\n'
+    atomic_write(COMMAND_PATH, launcher, 0o755)
+
+
+def prepare_managed_upgrade(candidate):
+    """Called by the new deployment script even when its parent CLI is legacy."""
+    candidate = candidate.resolve()
+    settings = candidate / '.env'
+    if not settings.is_symlink():
+        return  # Source checkout, not a managed release installation.
+    root = settings.resolve().parent
+    if candidate.parent != root / 'releases' or not (root / 'installation.json').is_file():
+        return
+    state = load_state(root)
+    current_manifest = root / 'current/release.json'
+    current_crypto = json.loads(current_manifest.read_text()).get('content_encryption', 0) if current_manifest.exists() else 0
+    candidate_crypto = json.loads((candidate / 'release.json').read_text()).get('content_encryption', 0)
+    minimum_crypto = max(current_crypto, state.get('content_encryption', 0))
+    if minimum_crypto > candidate_crypto:
+        raise InstallError('Нельзя откатить зашифрованную установку на сервер без поддержки шифрования.')
+    state['content_encryption'] = max(minimum_crypto, candidate_crypto)
+    state['pending_version'] = candidate.name
+    save_state(root, state)
+    install_controller(root, candidate / 'scripts/familychat.py')
+
+
 def install_commands(root):
-    launcher = '#!/bin/sh\nexec python3 ' + shlex.quote(str(root / 'current/scripts/familychat.py')) + ' --root ' + shlex.quote(str(root)) + ' "$@"\n'
-    atomic_write(Path('/usr/local/bin/familychat'), launcher, 0o755)
+    install_controller(root, root / 'current/scripts/familychat.py')
     atomic_write(Path('/etc/systemd/system/familychat-renew.service'),
                  '[Unit]\nDescription=Renew FamilyChat HTTPS certificate\nAfter=docker.service network-online.target\n'
                  '[Service]\nType=oneshot\nExecStart=/usr/local/bin/familychat renew\n', 0o644)
@@ -356,7 +396,7 @@ def main(argv=None):
             state = load_state(root)
         if args.command in ('install', 'update'):
             if args.command == 'update':
-                print('Обновление применяет миграции БД. Сохраните согласованную резервную копию PostgreSQL и файлов.')
+                print('Обновление применяет миграции БД. Сохраните согласованную резервную копию PostgreSQL, файлов и тома encryption_keys.')
                 if prompt('Резервная копия готова, продолжить обновление? [y/N]').lower() not in ('y', 'yes', 'д', 'да'):
                     raise InstallError('Обновление отменено.')
             check_network(state['domain'], state['public_ip'], fresh=False)

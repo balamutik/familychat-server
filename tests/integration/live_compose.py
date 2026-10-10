@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Exercise the running Compose stack without printing credentials or tokens."""
+import base64
 import json
 import pathlib
 import secrets
@@ -13,17 +14,67 @@ import uuid
 import zlib
 
 BASE = "http://127.0.0.1:8080"
+KEYS = {}
+USERS = {}
+CRYPTO_BINARY = None
+
+
+def crypt(token, data, context, decrypt=False):
+    if token not in KEYS:
+        status, key = api('GET', '/api/v1/encryption/key', token)
+        must(status, 200, 'encryption key')
+        KEYS[token] = key
+    request = {'key': KEYS[token], 'data': base64.b64encode(data).decode(),
+               'context': context, 'decrypt': decrypt}
+    result = subprocess.run([CRYPTO_BINARY], input=json.dumps(request).encode(), capture_output=True, check=True)
+    return base64.b64decode(json.loads(result.stdout)['data'])
+
+
+def client_preview(data, content_type):
+    if content_type == 'image/png':
+        return data
+    if content_type.startswith('video/'):
+        with tempfile.NamedTemporaryFile(suffix='.mp4') as source:
+            source.write(data)
+            source.flush()
+            return subprocess.run(['ffmpeg', '-nostdin', '-v', 'error', '-i', source.name,
+                                   '-frames:v', '1', '-f', 'image2pipe', '-vcodec', 'mjpeg', '-'],
+                                  capture_output=True, check=True).stdout
+    return None
+
 
 def api(method, path, token="", body=None, headers=None):
+    preview = None
+    chat_id = None
+    if method == 'POST' and path.startswith('/api/v1/chats/'):
+        chat_id = path.split('/')[4]
+        if path.endswith('/messages'):
+            body = dict(body)
+            context = f"message:{chat_id}:{USERS[token]}:{body['client_message_id']}"
+            body['text'] = base64.b64encode(crypt(token, body.get('text', '').encode(), context)).decode()
+            body['encrypted'] = True
+        elif path.endswith('/files'):
+            headers = dict(headers or {})
+            preview = client_preview(body, headers.get('Content-Type', ''))
+            headers['X-Plaintext-Size'] = str(len(body))
+            body = crypt(token, body, f'file:{chat_id}')
     data = None if body is None else (body if isinstance(body, bytes) else json.dumps(body).encode())
-    h = {"Content-Type": "application/json", **(headers or {})}
+    h = {"Content-Type": "application/json", "X-Content-Encryption": "fc1", **(headers or {})}
     if token:
         h["Authorization"] = "Bearer " + token
     req = urllib.request.Request(BASE + path, data=data, headers=h, method=method)
     try:
         with urllib.request.urlopen(req, timeout=10) as resp:
             raw = resp.read()
-            return resp.status, json.loads(raw) if raw and resp.headers.get_content_type() == "application/json" else raw
+            value = json.loads(raw) if raw and resp.headers.get_content_type() == "application/json" else raw
+            if path.endswith('/auth/login') and resp.status == 200:
+                USERS[value['token']] = value['user']['id']
+            if preview is not None and resp.status == 201:
+                preview_path = f"/api/v1/files/{value['id']}/preview"
+                status, _ = api('PUT', preview_path, token, crypt(token, preview, f'preview:{chat_id}'),
+                                {'Content-Type': 'application/octet-stream'})
+                must(status, 200, 'encrypted client preview')
+            return resp.status, value
     except urllib.error.HTTPError as exc:
         raw = exc.read()
         try:
@@ -86,9 +137,11 @@ def main():
     if file_id not in json.dumps(history):
         raise AssertionError("attachment metadata absent from history")
     status, results = api("GET", f"/api/v1/chats/{chat_id}/search?q=%D0%A1%D0%B5%D0%BC%D0%B5%D0%B9%D0%BD%D1%8B%D0%B9", token_b)
-    must(status, 200, "history search")
-    if not results["messages"]:
-        raise AssertionError("search missed saved message")
+    must(status, 410, "server search disabled")
+    message = history['messages'][0]
+    context = f"message:{chat_id}:{message['sender_id']}:{message['client_message_id']}"
+    if crypt(token_b, base64.b64decode(message['text']), context, decrypt=True).decode() != 'Семейный файл':
+        raise AssertionError('client could not decrypt history')
     for filename,ctype,contents in [('photo.png','image/png',png_image())]:
         status, media=api('POST',f'/api/v1/chats/{chat_id}/files',token_a,contents,{'Content-Type':ctype,'X-File-Name':filename})
         must(status,201,'media upload')
@@ -148,7 +201,10 @@ def main():
     must(status, 200, "history after restart")
     if file_id not in json.dumps(history):
         raise AssertionError("attachment missing after restart")
-    print("PASS: registration, admin, chats, private files, photo/video previews, search, calls, restart persistence")
+    print("PASS: registration, admin, chats, encrypted private files, client photo/video previews, local decryption, calls, restart persistence")
 
 if __name__ == "__main__":
-    main()
+    with tempfile.TemporaryDirectory(prefix='familychat-smoke-') as directory:
+        CRYPTO_BINARY = str(pathlib.Path(directory) / 'cryptoutil')
+        subprocess.run(['go', 'build', '-o', CRYPTO_BINARY, './tests/integration/cryptoutil'], check=True)
+        main()

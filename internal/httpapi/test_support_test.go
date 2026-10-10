@@ -55,6 +55,7 @@ func seedSession(t *testing.T, pool *pgxpool.Pool, role string) (string, string)
 func callAPI(h http.Handler, method, path, body, token string) *httptest.ResponseRecorder {
 	r := httptest.NewRequest(method, path, strings.NewReader(body))
 	r.Header.Set("Content-Type", "application/json")
+	r.Header.Set("X-Content-Encryption", "fc1")
 	if token != "" {
 		r.Header.Set("Authorization", "Bearer "+token)
 	}

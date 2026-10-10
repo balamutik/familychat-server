@@ -247,6 +247,20 @@ PY
     if [[ "$CERT_BOOTSTRAP" == true ]]; then
         trap 'compose stop nginx || true' EXIT
     fi
+    # A legacy installed CLI invokes this new script before switching `current`.
+    # Promote maintenance code now so interrupted migration cannot allow rollback.
+    python3 - "$ROOT_DIR" <<'PYTHON'
+import importlib.util
+from pathlib import Path
+import sys
+release = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('familychat_upgrade', release / 'scripts/familychat.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.prepare_managed_upgrade(release)
+PYTHON
+    # Stop the previous writer/preview worker before encrypting legacy storage.
+    compose stop api worker
     if [[ "$NO_BUILD" == true ]]; then
         compose up -d --no-build api worker turn nginx
     else

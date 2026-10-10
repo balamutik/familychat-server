@@ -3,6 +3,13 @@ info:
   title: FamilyChat Mobile API
   version: 0.1.0
   description: |
+    Content encryption protocol fc1: clients send X-Content-Encryption: fc1 when
+    reading chats/messages/files. Missing negotiation or plaintext writes return
+    HTTP 426 encryption_required. Obtain the common server key using the authenticated
+    GET /encryption/key over HTTPS. This is shared-key encryption, not E2EE.
+    Text is base64 of an FCENC001 envelope; file and preview bodies are binary envelopes.
+    HPKE suite is X25519/HKDF-SHA256/AES-256-GCM (RFC 9180 base mode).
+    See README.md for framing, contexts, migration and backup requirements.
     Контракт действующего Go-сервера для мобильных клиентов. Базовый путь — /api/v1.
     Все операции, кроме регистрации, входа, чтения аватара и WebSocket upgrade, требуют
     Authorization: Bearer <token>. Самостоятельная регистрация доступна только
@@ -166,7 +173,10 @@ components:
         role: {type: string, enum: [owner, admin, member]}
         avatar_url: {type: string, description: Публичный аватар собеседника в личном чате; отсутствует для группы и профиля без аватара.}
         unread_count: {type: integer, format: int64, minimum: 0, description: Число сообщений других участников после последней отмеченной позиции прочтения.}
-        last_message_preview: {type: string, description: Первые 160 символов текста последнего сообщения или имя первого вложения; отсутствует в пустом чате.}
+        last_message_ciphertext: {type: string, description: Base64 full encrypted last message. Decrypt locally to create a preview.}
+        last_message_sender_id: {$ref: '#/components/schemas/UUID'}
+        last_message_client_id: {$ref: '#/components/schemas/UUID'}
+        last_message_preview: {type: string, description: Заглушка для зашифрованного сообщения; клиент заменяет её расшифрованным last_message_ciphertext. Отсутствует в пустом чате.}
         last_message_at: {type: string, format: date-time, description: Время последнего сообщения; отсутствует в пустом чате.}
         last_message_sender: {type: string, description: Отображаемое имя отправителя последнего сообщения или логин; используется для превью группы.}
         presence:
@@ -220,11 +230,12 @@ components:
         owner_id: {$ref: '#/components/schemas/UUID'}
     Attachment:
       type: object
-      required: [id, chat_id, filename, content_type, size, preview_state, available]
+      required: [id, chat_id, filename, content_type, size, preview_state, available, encrypted]
       description: |
         Здесь нет готового URL: сформируйте /files/{id}/content и /files/{id}/preview
         относительно /api/v1. Preview доступен только при preview_state=ready.
       properties:
+        encrypted: {type: boolean, const: true}
         id: {$ref: '#/components/schemas/UUID'}
         chat_id: {$ref: '#/components/schemas/UUID'}
         filename: {type: string}
@@ -239,12 +250,13 @@ components:
     MessageInput:
       type: object
       additionalProperties: false
-      required: [client_message_id]
-      description: Нужны непустой text и/или хотя бы один attachment_id.
+      required: [client_message_id, text, encrypted]
+      description: Клиент шифрует текст (даже пустой) перед отправкой; лимит открытого текста 16000 Unicode scalars / 64000 bytes.
       properties:
+        encrypted: {type: boolean, const: true}
         client_message_id:
           $ref: '#/components/schemas/UUID'
-        text: {type: string, maxLength: 16000, default: ''}
+        text: {type: string, maxLength: 86000, description: Base64 FCENC001 ciphertext.}
         attachment_ids:
           type: array
           maxItems: 10
@@ -252,14 +264,15 @@ components:
           items: {$ref: '#/components/schemas/UUID'}
     Message:
       type: object
-      required: [id, chat_id, seq, sender_id, client_message_id, text, created_at, attachments, receipts, delivery]
+      required: [id, chat_id, seq, sender_id, client_message_id, text, created_at, attachments, receipts, delivery, encrypted]
       properties:
+        encrypted: {type: boolean, const: true}
         id: {$ref: '#/components/schemas/UUID'}
         chat_id: {$ref: '#/components/schemas/UUID'}
         seq: {type: integer, format: int64, minimum: 1, description: Порядковый номер внутри чата.}
         sender_id: {$ref: '#/components/schemas/UUID'}
         client_message_id: {$ref: '#/components/schemas/UUID'}
-        text: {type: string}
+        text: {type: string, description: Base64 FCENC001 encrypted text.}
         created_at:
           type: string
           description: Временная метка PostgreSQL с часовым поясом; сервер возвращает поле как текст.
@@ -465,6 +478,25 @@ x-websocket-messages:
     - {$ref: '#/components/schemas/Event'}
     - {$ref: '#/components/schemas/Signal'}
 paths:
+  /encryption/key:
+    get:
+      summary: Obtain the common server encryption key after authentication
+      description: HTTPS only in clients except loopback development. Returns Cache-Control no-store. Never log or persist this response outside protected key storage.
+      responses:
+        '200':
+          description: Shared server key; all authorized accounts receive the same pair.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [scheme, key_id, public_key, private_key]
+                properties:
+                  scheme: {type: string, const: fc1}
+                  key_id: {type: string, pattern: '^[0-9a-f]{64}$', description: SHA-256 of the raw public key.}
+                  public_key: {type: string, format: byte, description: Base64 raw X25519 public key (32 bytes).}
+                  private_key: {type: string, format: byte, description: Base64 raw X25519 private key (32 bytes).}
+        '401': {description: A valid active session is required.}
+        '503': {description: Encryption is unavailable.}
   /api/v1/admin/invites:
     get:
       summary: List the 100 most recent invitations (administrator only)
@@ -1026,8 +1058,9 @@ paths:
       operationId: sendMessage
       summary: Отправить сообщение
       description: |
-        client_message_id обеспечивает идемпотентность. Повтор с тем же текстом
-        и набором attachment_ids вернёт 200; с другим содержимым — 409.
+        client_message_id обеспечивает идемпотентность: первая запись неизменна.
+        Повтор с тем же id и attachment_ids возвращает исходное сообщение (200),
+        даже если повторное шифрование дало другие байты. Другие attachment_ids дают 409.
         Прикреплять можно только свои ранее загруженные файлы этого чата,
         которые ещё не были прикреплены к сообщению.
       requestBody:
@@ -1099,40 +1132,22 @@ paths:
         '404': {$ref: '#/components/responses/NotFound'}
   /chats/{id}/search:
     get:
-      tags: [Messages]
-      operationId: searchChatMessages
-      summary: Поиск по тексту и именам файлов в одном чате
-      description: Содержимое документов и OCR не индексируются.
+      deprecated: true
+      summary: Search moved to clients after encryption
       parameters:
         - {$ref: '#/components/parameters/ChatID'}
-        - name: q
-          in: query
-          required: true
-          schema: {type: string, minLength: 2, maxLength: 100}
-        - {$ref: '#/components/parameters/Limit'}
       responses:
-        '200':
-          description: Совпадения по seq убыванию.
-          content:
-            application/json:
-              schema:
-                type: object
-                required: [messages]
-                properties:
-                  messages:
-                    type: array
-                    items: {$ref: '#/components/schemas/Message'}
-        '400': {$ref: '#/components/responses/BadRequest'}
-        '401': {$ref: '#/components/responses/Unauthorized'}
-        '404': {$ref: '#/components/responses/NotFound'}
+        '410': {description: search_on_device. Download message pages and search decrypted local text; do not send queries to the server.}
+        '401': {description: Unauthorized.}
   /chats/{id}/files:
     post:
       tags: [Files]
       operationId: uploadChatFile
       summary: Загрузить файл потоком в приватное хранилище
       description: |
-        Тело — сырые байты, без multipart/form-data. Клиент должен указать
-        Content-Length > 0, X-File-Name и MIME в Content-Type. По умолчанию
+        Тело — бинарный конверт FCENC001, без multipart/form-data. Клиент указывает
+        Content-Length зашифрованного тела, X-Plaintext-Size оригинала,
+        X-Content-Encryption fc1, X-File-Name и исходный MIME в Content-Type. По умолчанию
         лимит 250 МиБ на файл и 10 ГиБ суммарно на пользователя. Администратор
         может изменить лимит файла в пределах серверного MAX_FILE_BYTES.
         Полученный id передайте в attachment_ids
@@ -1140,6 +1155,14 @@ paths:
         чата не может скачать файл. Если файл не прикреплён к сообщению в
         течение суток, worker удалит его и освободит квоту.
       parameters:
+        - name: X-Content-Encryption
+          in: header
+          required: true
+          schema: {type: string, const: fc1}
+        - name: X-Plaintext-Size
+          in: header
+          required: true
+          schema: {type: integer, format: int64, minimum: 1}
         - {$ref: '#/components/parameters/ChatID'}
         - name: X-File-Name*
           in: header
@@ -1220,8 +1243,8 @@ paths:
       operationId: downloadFile
       summary: Скачать оригинал с проверкой Bearer и членства
       description: |
-        Для видео делайте отдельные авторизованные Range-запросы. MIME ответа
-        равен content_type метаданных, а не всегда application/octet-stream.
+        Ответ — application/octet-stream с FCENC001. Range относится к байтам
+        шифротекста; перед проигрыванием клиент скачивает и расшифровывает файл.
         Каждый запрос проверяет доступ заново; не используйте публичные URL
         или нативный плеер, который не умеет передавать Authorization.
       responses:
@@ -1268,30 +1291,39 @@ paths:
     parameters:
       - {$ref: '#/components/parameters/FileID'}
       - {$ref: '#/components/parameters/Range'}
+    put:
+      summary: Upload a client-generated encrypted preview
+      description: Only the uploader who is still a chat member can create a preview. Repeated PUT returns the first stored preview without replacement. Maximum plaintext size is 1 MiB; FCENC001 envelope context is preview followed by a colon and the lowercase chat UUID.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: {type: string, format: binary}
+      responses:
+        '200': {description: Preview is ready.}
+        '400': {description: Invalid envelope.}
+        '401': {description: Unauthorized.}
+        '404': {description: File is unavailable or not owned by this user.}
     get:
       tags: [Files]
       operationId: downloadFilePreview
-      summary: Скачать PNG-превью изображения или JPEG-превью видео с проверкой Bearer и членства
+      summary: Скачать зашифрованное превью с проверкой Bearer и членства
       description: Если preview_state ещё не ready либо превью не создано, возвращается 404.
       responses:
         '200':
-          description: Полное PNG-превью изображения или JPEG-превью видео.
+          description: Зашифрованное превью FCENC001.
           headers:
             Accept-Ranges: {schema: {type: string}, example: bytes}
             Cache-Control: {schema: {type: string}, example: 'private, no-store'}
           content:
-            image/jpeg:
-              schema: {type: string, format: binary}
-            image/png:
+            application/octet-stream:
               schema: {type: string, format: binary}
         '206':
-          description: Диапазон байтов PNG- или JPEG-превью.
+          description: Диапазон байтов шифротекста.
           headers:
             Content-Range: {schema: {type: string}}
           content:
-            image/jpeg:
-              schema: {type: string, format: binary}
-            image/png:
+            application/octet-stream:
               schema: {type: string, format: binary}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {$ref: '#/components/responses/NotFound'}
@@ -1301,7 +1333,7 @@ paths:
       operationId: headFilePreview
       summary: Проверить доступ и заголовки превью без тела
       responses:
-        '200': {description: Заголовки полного PNG- или JPEG-превью, без тела.}
+        '200': {description: Заголовки полного зашифрованного превью, без тела.}
         '206': {description: Заголовки диапазона, без тела.}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {$ref: '#/components/responses/NotFound'}

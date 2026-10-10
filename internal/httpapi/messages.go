@@ -10,11 +10,13 @@ import (
 	"unicode/utf8"
 
 	"familychat/server/internal/auth"
+
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type messageView struct {
+	Encrypted       bool          `json:"encrypted"`
 	ID              string        `json:"id"`
 	ChatID          string        `json:"chat_id"`
 	Seq             int64         `json:"seq"`
@@ -44,6 +46,7 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 	protected := func(pattern string, fn http.HandlerFunc) { mux.Handle(pattern, require(d.Auth, fn)) }
 	protected("POST /api/v1/chats/{id}/messages", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
+			Encrypted       bool     `json:"encrypted"`
 			ClientMessageID string   `json:"client_message_id"`
 			Text            string   `json:"text"`
 			AttachmentIDs   []string `json:"attachment_ids"`
@@ -51,7 +54,15 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 		if !decodeJSON(w, r, &body) {
 			return
 		}
-		if !validUUID(body.ClientMessageID) || utf8.RuneCountInString(body.Text) > 16000 || (strings.TrimSpace(body.Text) == "" && len(body.AttachmentIDs) == 0) || len(body.AttachmentIDs) > 10 {
+		if d.ContentKey != nil && !body.Encrypted {
+			writeError(w, 426, "encryption_required")
+			return
+		}
+		if body.Encrypted && (d.ContentKey == nil || d.ContentKey.ValidateText(body.Text) != nil) {
+			writeError(w, 400, "invalid_encrypted_content")
+			return
+		}
+		if !validUUID(body.ClientMessageID) || (!body.Encrypted && (utf8.RuneCountInString(body.Text) > 16000 || (strings.TrimSpace(body.Text) == "" && len(body.AttachmentIDs) == 0))) || len(body.AttachmentIDs) > 10 {
 			writeError(w, 400, "invalid_message")
 			return
 		}
@@ -69,7 +80,7 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 		}
 		var v messageView
 		var existingText string
-		err = tx.QueryRow(r.Context(), `SELECT id::text,chat_id::text,seq,sender_id::text,client_message_id::text,body,created_at::text FROM messages WHERE chat_id=$1 AND sender_id=$2 AND client_message_id=$3`, chatID, p.UserID, body.ClientMessageID).Scan(&v.ID, &v.ChatID, &v.Seq, &v.SenderID, &v.ClientMessageID, &existingText, &v.CreatedAt)
+		err = tx.QueryRow(r.Context(), `SELECT id::text,chat_id::text,seq,sender_id::text,client_message_id::text,body,encrypted,created_at::text FROM messages WHERE chat_id=$1 AND sender_id=$2 AND client_message_id=$3`, chatID, p.UserID, body.ClientMessageID).Scan(&v.ID, &v.ChatID, &v.Seq, &v.SenderID, &v.ClientMessageID, &existingText, &v.Encrypted, &v.CreatedAt)
 		if err == nil {
 			rows, queryErr := tx.Query(r.Context(), `SELECT attachment_id::text FROM message_attachments WHERE message_id=$1 ORDER BY attachment_id`, v.ID)
 			if queryErr != nil {
@@ -103,7 +114,7 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 					}
 				}
 			}
-			if existingText != body.Text || !sameIDs {
+			if v.Encrypted != body.Encrypted || (!body.Encrypted && existingText != body.Text) || !sameIDs {
 				writeError(w, 409, "message_id_conflict")
 				return
 			}
@@ -144,7 +155,7 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 			writeError(w, 500, "internal")
 			return
 		}
-		err = tx.QueryRow(r.Context(), `INSERT INTO messages(chat_id,seq,sender_id,client_message_id,body) VALUES($1,$2,$3,$4,$5) RETURNING id::text,created_at::text`, chatID, seq, p.UserID, body.ClientMessageID, body.Text).Scan(&v.ID, &v.CreatedAt)
+		err = tx.QueryRow(r.Context(), `INSERT INTO messages(chat_id,seq,sender_id,client_message_id,body,encrypted) VALUES($1,$2,$3,$4,$5,$6) RETURNING id::text,created_at::text`, chatID, seq, p.UserID, body.ClientMessageID, body.Text, body.Encrypted).Scan(&v.ID, &v.CreatedAt)
 		if err != nil {
 			writeError(w, 500, "internal")
 			return
@@ -180,6 +191,7 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 		v.SenderID = p.UserID
 		v.ClientMessageID = body.ClientMessageID
 		v.Text = body.Text
+		v.Encrypted = body.Encrypted
 		if err := attachMetadata(r.Context(), d.DB, []*messageView{&v}); err != nil {
 			writeError(w, 500, "internal")
 			return
@@ -214,14 +226,14 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 		var rows pgx.Rows
 		var err error
 		if after != "" {
-			rows, err = d.DB.Query(r.Context(), `SELECT m.id::text,m.chat_id::text,m.seq,m.sender_id::text,m.client_message_id::text,m.body,m.created_at::text
+			rows, err = d.DB.Query(r.Context(), `SELECT m.id::text,m.chat_id::text,m.seq,m.sender_id::text,m.client_message_id::text,m.body,m.encrypted,m.created_at::text
 				FROM messages m JOIN chat_members cm ON cm.chat_id=m.chat_id JOIN chats c ON c.id=m.chat_id
 				WHERE m.chat_id=$1 AND cm.user_id=$2 AND c.deleted_at IS NULL AND m.seq>$3 ORDER BY m.seq ASC LIMIT $4`, id, p.UserID, cursor, parseLimit(r))
 		} else {
 			if before == "" {
 				cursor = 9223372036854775807
 			}
-			rows, err = d.DB.Query(r.Context(), `SELECT m.id::text,m.chat_id::text,m.seq,m.sender_id::text,m.client_message_id::text,m.body,m.created_at::text
+			rows, err = d.DB.Query(r.Context(), `SELECT m.id::text,m.chat_id::text,m.seq,m.sender_id::text,m.client_message_id::text,m.body,m.encrypted,m.created_at::text
 				FROM messages m JOIN chat_members cm ON cm.chat_id=m.chat_id JOIN chats c ON c.id=m.chat_id
 				WHERE m.chat_id=$1 AND cm.user_id=$2 AND c.deleted_at IS NULL AND m.seq<$3 ORDER BY m.seq DESC LIMIT $4`, id, p.UserID, cursor, parseLimit(r))
 		}
@@ -233,7 +245,7 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 		messages := []messageView{}
 		for rows.Next() {
 			var v messageView
-			if err := rows.Scan(&v.ID, &v.ChatID, &v.Seq, &v.SenderID, &v.ClientMessageID, &v.Text, &v.CreatedAt); err != nil {
+			if err := rows.Scan(&v.ID, &v.ChatID, &v.Seq, &v.SenderID, &v.ClientMessageID, &v.Text, &v.Encrypted, &v.CreatedAt); err != nil {
 				writeError(w, 500, "internal")
 				return
 			}
@@ -259,6 +271,10 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 	protected("POST /api/v1/chats/{id}/delivered", func(w http.ResponseWriter, r *http.Request) { markReceipt(w, r, d, false) })
 	protected("POST /api/v1/chats/{id}/read", func(w http.ResponseWriter, r *http.Request) { markReceipt(w, r, d, true) })
 	protected("GET /api/v1/chats/{id}/search", func(w http.ResponseWriter, r *http.Request) {
+		if d.ContentKey != nil {
+			writeError(w, 410, "search_on_device")
+			return
+		}
 		id := r.PathValue("id")
 		if !validUUID(id) {
 			writeError(w, 404, "not_found")
@@ -270,7 +286,7 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 			writeError(w, 400, "invalid_query")
 			return
 		}
-		rows, err := d.DB.Query(r.Context(), `SELECT m.id::text,m.chat_id::text,m.seq,m.sender_id::text,m.client_message_id::text,m.body,m.created_at::text
+		rows, err := d.DB.Query(r.Context(), `SELECT m.id::text,m.chat_id::text,m.seq,m.sender_id::text,m.client_message_id::text,m.body,m.encrypted,m.created_at::text
 			FROM messages m JOIN chats c ON c.id=m.chat_id JOIN chat_members cm ON cm.chat_id=c.id
 			WHERE m.chat_id=$1 AND cm.user_id=$2 AND c.deleted_at IS NULL AND
 			(to_tsvector('russian',m.body) @@ plainto_tsquery('russian',$3) OR m.body ILIKE '%'||$3||'%' OR
@@ -284,7 +300,7 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 		messages := []messageView{}
 		for rows.Next() {
 			var v messageView
-			if err := rows.Scan(&v.ID, &v.ChatID, &v.Seq, &v.SenderID, &v.ClientMessageID, &v.Text, &v.CreatedAt); err != nil {
+			if err := rows.Scan(&v.ID, &v.ChatID, &v.Seq, &v.SenderID, &v.ClientMessageID, &v.Text, &v.Encrypted, &v.CreatedAt); err != nil {
 				writeError(w, 500, "internal")
 				return
 			}
@@ -375,7 +391,7 @@ func attachMetadata(ctx context.Context, db *pgxpool.Pool, messages []*messageVi
 		ids = append(ids, v.ID)
 		byID[v.ID] = v
 	}
-	rows, err := db.Query(ctx, `SELECT ma.message_id::text,a.id::text,a.chat_id::text,a.filename,a.content_type,a.size_bytes,a.preview_state,
+	rows, err := db.Query(ctx, `SELECT ma.message_id::text,a.id::text,a.chat_id::text,a.filename,a.content_type,a.size_bytes,a.preview_state,a.encrypted,
 		(a.purged_at IS NULL AND (s.retention_days=0 OR a.created_at>now()-s.retention_days*interval '1 day'))
 		FROM message_attachments ma JOIN attachments a ON a.id=ma.attachment_id CROSS JOIN settings s
 		WHERE ma.message_id=ANY($1::uuid[]) ORDER BY ma.message_id,a.id`, ids)
@@ -386,7 +402,7 @@ func attachMetadata(ctx context.Context, db *pgxpool.Pool, messages []*messageVi
 	for rows.Next() {
 		var messageID string
 		var a fileMeta
-		if err := rows.Scan(&messageID, &a.ID, &a.ChatID, &a.Filename, &a.ContentType, &a.Size, &a.PreviewState, &a.Available); err != nil {
+		if err := rows.Scan(&messageID, &a.ID, &a.ChatID, &a.Filename, &a.ContentType, &a.Size, &a.PreviewState, &a.Encrypted, &a.Available); err != nil {
 			return err
 		}
 		if v := byID[messageID]; v != nil {

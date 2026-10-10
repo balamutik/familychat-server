@@ -23,7 +23,7 @@ def package(version, image, output):
     if compose.count('    build: .\n') != 2:
         raise ValueError('expected API and worker build declarations')
     files['compose.yaml'] = compose.replace('    build: .\n', f'    image: {image}\n').encode()
-    files['release.json'] = (json.dumps({'version': version, 'image': image,
+    files['release.json'] = (json.dumps({'version': version, 'image': image, 'content_encryption': 1,
                                        'repository': 'balamutik/familychat-server'}, indent=2)+'\n').encode()
     output.mkdir(parents=True, exist_ok=True)
     archive_path = output / 'familychat-server.tar.gz'

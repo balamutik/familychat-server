@@ -1,0 +1,10 @@
+{
+  "context" : "message:00000000-0000-4000-8000-000000000001:00000000-0000-4000-8000-000000000002:00000000-0000-4000-8000-000000000003",
+  "go_ciphertext" : "RkNFTkMwMDEwYS7Vzn3DPg0T+KQrWMe6gMTbzTEjAmvfETHZEf0dsyKsaioESGjyy80ApZrRFHFtUcxaojuWMM9ZGYyF10UWAAAAAAAAADR4m8NoWXnEMLLyG7r\/uG9xlKG71seM+FZ2waQepu0Gip5HNq2i5g5+\/QdrurfUXCI6tAgBZd1YfAYmkbgDIYMOmuL99A==",
+  "key_id" : "30612ed5ce7dc33e0d13f8a42b58c7ba80c4dbcd3123026bdf1131d911fd1db3",
+  "plaintext" : "Совместимость iOS ↔ macOS ↔ Go 🔐",
+  "private_key" : "MOg7hmVEQ\/qPLUSXKZ0h1kofJJfUTVW9ArJb010z828=",
+  "public_key" : "Mhj24LoX5IIMdINfEOEaxZL8cqu8bOHW93lZiJdnagM=",
+  "scheme" : "fc1",
+  "swift_ciphertext" : "RkNFTkMwMDEwYS7Vzn3DPg0T+KQrWMe6gMTbzTEjAmvfETHZEf0dsxSzWja4m7ehRkhu8GrxsAM32YE05y+052roe45+ROZnAAAAAAAAADQvurMSdQCvtZTx6vy\/wex3VtdVveL6tkn11Ut8EmWBVxnuGIHTefv7EBNVo0Fa4YUVFhGnrtaRsB8t3lQLl5QM7V3P5g=="
+}

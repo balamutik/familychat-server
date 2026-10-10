@@ -28,5 +28,8 @@ with tempfile.TemporaryDirectory() as temp:
     assert config['services']['api']['environment']['ALLOWED_ORIGINS'] == 'chat.example.com'
     assert config['volumes']['postgres_data']['name'] == 'familychat_postgres_data'
     assert config['volumes']['s3_data']['name'] == 'familychat_s3_data'
+    assert config['volumes']['encryption_keys']['name'] == 'familychat_encryption_keys'
+    assert config['services']['worker']['depends_on']['api']['condition'] == 'service_healthy'
+    assert any(v.get('source') == 'encryption_keys' for v in config['services']['api']['volumes'])
     assert config['secrets']['admin_password']['file'] == str(release / 'secrets/admin-password.txt')
 print('Release Compose valid: fixed image, stable volumes, HTTPS-only API, generated secrets.')

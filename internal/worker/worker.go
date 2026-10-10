@@ -81,7 +81,7 @@ func (w *Worker) Once(ctx context.Context) error {
 	var j job
 	err = tx.QueryRow(ctx, `SELECT j.id::text,j.attachment_id::text,a.chat_id::text,a.object_key,a.content_type,j.attempts
 		FROM preview_jobs j JOIN attachments a ON a.id=j.attachment_id CROSS JOIN settings s
-		WHERE a.purged_at IS NULL AND (s.retention_days=0 OR a.created_at>now()-s.retention_days*interval '1 day')
+		WHERE NOT a.encrypted AND NOT EXISTS(SELECT 1 FROM content_encryption) AND a.purged_at IS NULL AND (s.retention_days=0 OR a.created_at>now()-s.retention_days*interval '1 day')
 		AND ((j.state='pending' AND (j.lease_until IS NULL OR j.lease_until<now())) OR (j.state='processing' AND j.lease_until<now()))
 		ORDER BY j.created_at FOR UPDATE OF j SKIP LOCKED LIMIT 1`).Scan(&j.ID, &j.AttachmentID, &j.ChatID, &j.ObjectKey, &j.ContentType, &j.Attempts)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -312,6 +312,32 @@ func (w *Worker) makePreview(ctx context.Context, j job) (string, string) {
 }
 
 func (w *Worker) cleanup(ctx context.Context) error {
+	garbage, err := w.DB.Query(ctx, `SELECT object_key FROM encryption_gc WHERE not_before<=now() LIMIT 25`)
+	if err != nil {
+		return err
+	}
+	var obsolete []string
+	for garbage.Next() {
+		var key string
+		if err := garbage.Scan(&key); err != nil {
+			garbage.Close()
+			return err
+		}
+		obsolete = append(obsolete, key)
+	}
+	err = garbage.Err()
+	garbage.Close()
+	if err != nil {
+		return err
+	}
+	for _, key := range obsolete {
+		if err := w.Objects.Delete(ctx, key); err != nil {
+			return err
+		}
+		if _, err := w.DB.Exec(ctx, `DELETE FROM encryption_gc WHERE object_key=$1`, key); err != nil {
+			return err
+		}
+	}
 	if _, err := w.DB.Exec(ctx, `DELETE FROM push_jobs WHERE created_at<now()-interval '1 day'`); err != nil {
 		return err
 	}

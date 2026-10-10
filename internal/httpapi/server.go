@@ -4,9 +4,11 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"familychat/server/internal/auth"
+	"familychat/server/internal/contentcrypto"
 	"familychat/server/internal/events"
 	"familychat/server/internal/objects"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -22,6 +24,7 @@ type FileStore interface {
 }
 
 type Dependencies struct {
+	ContentKey     *contentcrypto.Key
 	DB             *pgxpool.Pool
 	Objects        FileStore
 	Auth           *auth.Service
@@ -53,6 +56,7 @@ func New(deps Dependencies) http.Handler {
 		_, _ = w.Write([]byte(`{"status":"ready"}`))
 	})
 	registerAuth(mux, deps)
+	registerContentEncryption(mux, deps)
 	registerInvites(mux, deps)
 	registerChats(mux, deps)
 	registerUsers(mux, deps)
@@ -63,7 +67,17 @@ func New(deps Dependencies) http.Handler {
 	registerCalls(mux, deps)
 	registerPushDevices(mux, deps)
 	registerAdminUI(mux, deps.AdminStaticDir)
-	return mux
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		contentRead := r.Method == "GET" || r.Method == "HEAD"
+		contentRead = contentRead && (path == "/api/v1/chats" || strings.HasPrefix(path, "/api/v1/files/") ||
+			(strings.HasPrefix(path, "/api/v1/chats/") && (strings.HasSuffix(path, "/messages") || strings.Count(strings.TrimPrefix(path, "/api/v1/chats/"), "/") == 0)))
+		if deps.ContentKey != nil && contentRead && r.Header.Get("X-Content-Encryption") != "fc1" {
+			writeError(w, 426, "encryption_required")
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
 }
 
 func require(s *auth.Service, h http.Handler) http.Handler {

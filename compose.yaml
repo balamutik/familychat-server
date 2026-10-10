@@ -49,6 +49,8 @@ services:
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-localhost}
       ADMIN_LOGIN: ${ADMIN_LOGIN:-admin}
       ADMIN_PASSWORD_FILE: /run/secrets/admin_password
+    volumes:
+      - encryption_keys:/var/lib/familychat/crypto
     secrets:
       - admin_password
     ports:
@@ -61,6 +63,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+      start_period: 24h
     restart: unless-stopped
 
   worker:
@@ -70,6 +73,7 @@ services:
     volumes:
       - ${APNS_KEY_FILE:-/dev/null}:/run/secrets/apns_key:ro
     depends_on:
+      api: {condition: service_healthy}
       postgres: {condition: service_healthy}
       s3: {condition: service_started}
     restart: unless-stopped
@@ -104,3 +108,4 @@ secrets:
 volumes:
   postgres_data:
   s3_data:
+  encryption_keys:

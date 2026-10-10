@@ -14,6 +14,7 @@ import (
 
 	"familychat/server/internal/auth"
 	"familychat/server/internal/config"
+	"familychat/server/internal/contentcrypto"
 	"familychat/server/internal/database"
 	"familychat/server/internal/events"
 	"familychat/server/internal/httpapi"
@@ -101,6 +102,15 @@ func run(ctx context.Context, args []string) error {
 		defer stop()
 		return (&worker.Worker{DB: pool, Objects: store, Push: pushClient}).Run(stopCtx)
 	}
+	keyPath := os.Getenv("CONTENT_KEY_FILE")
+	if keyPath == "" {
+		keyPath = "/var/lib/familychat/crypto/key.json"
+	}
+	log.Print("Checking content encryption and migrating legacy data")
+	contentKey, err := contentcrypto.Initialize(ctx, pool, store, keyPath)
+	if err != nil {
+		return fmt.Errorf("content encryption initialization: %w", err)
+	}
 	service := &auth.Service{DB: pool, TTL: c.SessionTTL}
 	hub := events.NewHub(pool)
 	hubCtx, cancelHub := context.WithCancel(ctx)
@@ -128,7 +138,7 @@ func run(ctx context.Context, args []string) error {
 			}
 		}
 	}()
-	h := httpapi.New(httpapi.Dependencies{DB: pool, Objects: store, Auth: service, Events: hub, AllowedOrigins: c.AllowedOrigins, TurnURL: c.TurnURL, TurnSecret: c.TurnSecret, PushEnabled: c.APNsKeyFile != "", MaxFileBytes: c.MaxFileBytes, UserQuotaBytes: c.UserQuotaBytes, AdminStaticDir: os.Getenv("ADMIN_STATIC_DIR")})
+	h := httpapi.New(httpapi.Dependencies{ContentKey: contentKey, DB: pool, Objects: store, Auth: service, Events: hub, AllowedOrigins: c.AllowedOrigins, TurnURL: c.TurnURL, TurnSecret: c.TurnSecret, PushEnabled: c.APNsKeyFile != "", MaxFileBytes: c.MaxFileBytes, UserQuotaBytes: c.UserQuotaBytes, AdminStaticDir: os.Getenv("ADMIN_STATIC_DIR")})
 	srv := &http.Server{Addr: c.ListenAddr, Handler: h, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	signalCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()

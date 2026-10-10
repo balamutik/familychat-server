@@ -90,6 +90,67 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(previous.resolve(), (self.root / 'current').resolve())
         self.assertEqual(before, (self.root / '.env').read_bytes())
 
+    def test_encrypted_installation_cannot_downgrade_to_plaintext_release(self):
+        state = installer.configure(self.root, 'chat.example.com', 'admin@example.com', '8.8.8.8')
+        previous = self.root / 'releases/v2.0.0'
+        candidate = self.root / 'releases/v1.0.3'
+        previous.mkdir(parents=True)
+        candidate.mkdir()
+        (previous / 'release.json').write_text(json.dumps({'content_encryption': 1}))
+        (candidate / 'release.json').write_text(json.dumps({'version': 'v1.0.3'}))
+        (self.root / 'current').symlink_to(previous)
+        with patch.object(installer, 'compose') as compose:
+            with self.assertRaises(installer.InstallError):
+                installer.activate(self.root, candidate, state)
+        compose.assert_not_called()
+
+    def test_interrupted_encryption_activation_prevents_legacy_downgrade(self):
+        state = installer.configure(self.root, 'chat.example.com', 'admin@example.com', '8.8.8.8')
+        previous = self.root / 'releases/v1.0.3'
+        candidate = self.root / 'releases/v2.0.0'
+        previous.mkdir(parents=True)
+        candidate.mkdir()
+        (previous / 'release.json').write_text(json.dumps({'version': 'v1.0.3'}))
+        (candidate / 'release.json').write_text(json.dumps({'content_encryption': 1}))
+        (self.root / 'current').symlink_to(previous)
+        with patch.object(installer, 'compose'), patch.object(installer, 'run', side_effect=installer.InstallError('interrupted after migration')):
+            with self.assertRaises(installer.InstallError):
+                installer.activate(self.root, candidate, state)
+        self.assertEqual(previous.resolve(), (self.root / 'current').resolve())
+        persisted = installer.load_state(self.root)
+        with patch.object(installer, 'compose') as compose:
+            with self.assertRaises(installer.InstallError):
+                installer.activate(self.root, previous, persisted)
+        compose.assert_not_called()
+
+    def test_legacy_launcher_is_replaced_before_encryption_migration(self):
+        state = installer.configure(self.root, 'chat.example.com', 'admin@example.com', '8.8.8.8')
+        previous = self.root / 'releases/v1.0.3'
+        candidate = self.root / 'releases/v2.0.0'
+        (previous / 'scripts').mkdir(parents=True)
+        (candidate / 'scripts').mkdir(parents=True)
+        (previous / 'release.json').write_text(json.dumps({'version': 'v1.0.3'}))
+        (candidate / 'release.json').write_text(json.dumps({'content_encryption': 1}))
+        (candidate / 'scripts/familychat.py').write_bytes((ROOT / 'scripts/familychat.py').read_bytes())
+        (self.root / 'current').symlink_to(previous)
+        installer.link_state(self.root, candidate)
+        launcher = self.root / 'familychat-command'
+        launcher.write_text('legacy controller')
+        with patch.object(installer, 'COMMAND_PATH', launcher):
+            installer.prepare_managed_upgrade(candidate)
+        self.assertIn(str(self.root / 'manager.py'), launcher.read_text())
+        self.assertEqual(previous.resolve(), (self.root / 'current').resolve())
+        spec = importlib.util.spec_from_file_location('upgraded_installer', self.root / 'manager.py')
+        upgraded = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(upgraded)
+        persisted = upgraded.load_state(self.root)
+        self.assertEqual(1, persisted['content_encryption'])
+        self.assertEqual(candidate.name, persisted['pending_version'])
+        with patch.object(upgraded, 'compose') as compose:
+            with self.assertRaises(upgraded.InstallError):
+                upgraded.activate(self.root, previous, persisted)
+        compose.assert_not_called()
+
     def test_existing_admin_after_interruption_is_not_recreated(self):
         state = installer.configure(self.root, 'chat.example.com', 'admin@example.com', '8.8.8.8')
         with patch.object(installer, 'compose', return_value=subprocess.CompletedProcess([], 0, '1\n', '')) as command:
@@ -115,7 +176,7 @@ class InstallerTests(unittest.TestCase):
             installer.activate(self.root, candidate, state)
         self.assertEqual(candidate.resolve(), (self.root / 'current').resolve())
         self.assertNotIn('pending_version', installer.load_state(self.root))
-        self.assertEqual(['config', 'pull', 'up'], [call.args[3] for call in compose.call_args_list])
+        self.assertEqual(['config', 'pull', 'stop', 'up'], [call.args[3] for call in compose.call_args_list])
         self.assertIn('--no-build', run.call_args.args[0])
 
     def test_network_rejects_wrong_dns_and_occupied_ports_before_config(self):

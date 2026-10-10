@@ -3,6 +3,13 @@ info:
   title: FamilyChat API
   version: 0.1.0
   description: |
+    Content encryption protocol fc1: clients send X-Content-Encryption: fc1 when
+    reading chats/messages/files. Missing negotiation or plaintext writes return
+    HTTP 426 encryption_required. Obtain the common server key using the authenticated
+    GET /encryption/key over HTTPS. This is shared-key encryption, not E2EE.
+    Text is base64 of an FCENC001 envelope; file and preview bodies are binary envelopes.
+    HPKE suite is X25519/HKDF-SHA256/AES-256-GCM (RFC 9180 base mode).
+    See README.md for framing, contexts, migration and backup requirements.
     All chat, call and private file operations require an opaque Bearer session token.
     Chat file bytes are served only by this API after a current chat membership check.
     Current JPEG/PNG user avatars are the sole public file exception and are streamed by the API without exposing S3. Other common image uploads are normalized to PNG avatars.
@@ -74,10 +81,11 @@ components:
         avatar_url: {type: string, description: Optional relative public URL.}
     MessageInput:
       type: object
-      required: [client_message_id]
+      required: [client_message_id, text, encrypted]
       properties:
+        encrypted: {type: boolean, const: true}
         client_message_id: {$ref: '#/components/schemas/UUID'}
-        text: {type: string, maxLength: 16000}
+        text: {type: string, maxLength: 86000, description: Base64 FCENC001 ciphertext.}
         attachment_ids:
           type: array
           maxItems: 10
@@ -128,6 +136,25 @@ components:
 security:
   - bearer: []
 paths:
+  /encryption/key:
+    get:
+      summary: Obtain the common server encryption key after authentication
+      description: HTTPS only in clients except loopback development. Returns Cache-Control no-store. Never log or persist this response outside protected key storage.
+      responses:
+        '200':
+          description: Shared server key; all authorized accounts receive the same pair.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [scheme, key_id, public_key, private_key]
+                properties:
+                  scheme: {type: string, const: fc1}
+                  key_id: {type: string, pattern: '^[0-9a-f]{64}$', description: SHA-256 of the raw public key.}
+                  public_key: {type: string, format: byte, description: Base64 raw X25519 public key (32 bytes).}
+                  private_key: {type: string, format: byte, description: Base64 raw X25519 private key (32 bytes).}
+        '401': {description: A valid active session is required.}
+        '503': {description: Encryption is unavailable.}
   /api/v1/admin/invites:
     get:
       summary: List the 100 most recent invitations (administrator only)
@@ -514,21 +541,20 @@ paths:
       responses: {'200': {description: 'delivered_seq and read_seq'}}
   /chats/{id}/search:
     get:
-      summary: Search text and attachment filenames within this chat
+      deprecated: true
+      summary: Search moved to clients after encryption
       parameters:
         - {$ref: '#/components/parameters/ChatID'}
-        - name: q
-          in: query
-          required: true
-          schema: {type: string}
-      responses: {'200': {description: Results}}
+      responses:
+        '410': {description: search_on_device. Download message pages and search decrypted local text; do not send queries to the server.}
+        '401': {description: Unauthorized.}
   /chats/{id}/files:
     post:
       summary: Stream a file through the API to private S3
       parameters: [{$ref: '#/components/parameters/ChatID'}]
       requestBody:
         required: true
-        description: Requires Content-Length and X-File-Name request headers.
+        description: Requires Content-Length of ciphertext, X-Plaintext-Size, X-Content-Encryption (fc1), X-File-Name and original MIME in Content-Type. A client-generated encrypted preview can be uploaded separately; its failure does not invalidate the original.
         content:
           application/octet-stream:
             schema: {type: string, format: binary}
@@ -541,16 +567,29 @@ paths:
   /files/{id}/content:
     parameters: [{$ref: '#/components/parameters/FileID'}]
     get:
-      summary: Authorized original bytes; supports Range
+      summary: Authorized FCENC001 ciphertext; Range uses ciphertext offsets
       responses: {'200': {description: Bytes}, '206': {description: Byte range}, '404': {description: Inaccessible or absent}}
     head:
       summary: Authorized original metadata
       responses: {'200': {description: Headers}, '206': {description: Range headers}}
   /files/{id}/preview:
     parameters: [{$ref: '#/components/parameters/FileID'}]
+    put:
+      summary: Upload a client-generated encrypted preview
+      description: Only the uploader who is still a chat member can create a preview. Repeated PUT returns the first stored preview without replacement. Maximum plaintext size is 1 MiB; FCENC001 envelope context is preview followed by a colon and the lowercase chat UUID.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: {type: string, format: binary}
+      responses:
+        '200': {description: Preview is ready.}
+        '400': {description: Invalid envelope.}
+        '401': {description: Unauthorized.}
+        '404': {description: File is unavailable or not owned by this user.}
     get:
-      summary: Authorized generated preview; supports Range
-      responses: {'200': {description: PNG preview for images or JPEG preview for video}, '404': {description: Unavailable}}
+      summary: Authorized client-generated encrypted preview
+      responses: {'200': {description: FCENC001 ciphertext (application/octet-stream)}, '404': {description: Unavailable}}
     head:
       summary: Authorized preview headers
       responses: {'200': {description: Headers}}
