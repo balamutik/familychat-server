@@ -33,7 +33,7 @@ func main() {
 
 func run(ctx context.Context, args []string) error {
 	if len(args) != 1 {
-		return errors.New("usage: familychat serve|migrate|bootstrap-admin|worker|healthcheck")
+		return errors.New("usage: familychat serve|migrate|bootstrap-admin|worker|healthcheck|prepare-content-secrets")
 	}
 	if args[0] == "healthcheck" {
 		client := &http.Client{Timeout: 3 * time.Second}
@@ -74,7 +74,7 @@ func run(ctx context.Context, args []string) error {
 		}
 		return bootstrapAdmin(ctx, pool, login, strings.TrimSuffix(strings.TrimSuffix(string(password), "\n"), "\r"))
 	}
-	if args[0] != "serve" && args[0] != "migrate" && args[0] != "worker" {
+	if args[0] != "serve" && args[0] != "migrate" && args[0] != "worker" && args[0] != "prepare-content-secrets" {
 		return errors.New("unknown command")
 	}
 	c, err := config.Load()
@@ -89,6 +89,9 @@ func run(ctx context.Context, args []string) error {
 	if err := database.Migrate(ctx, pool); err != nil {
 		return err
 	}
+	if args[0] == "prepare-content-secrets" {
+		return contentcrypto.PrepareSecrets(ctx, pool, "/run/content-secrets", "/legacy-keys/key.json")
+	}
 	if args[0] == "migrate" {
 		return nil
 	}
@@ -102,12 +105,15 @@ func run(ctx context.Context, args []string) error {
 		defer stop()
 		return (&worker.Worker{DB: pool, Objects: store, Push: pushClient}).Run(stopCtx)
 	}
-	keyPath := os.Getenv("CONTENT_KEY_FILE")
-	if keyPath == "" {
-		keyPath = "/var/lib/familychat/crypto/key.json"
-	}
 	log.Print("Checking content encryption and migrating legacy data")
-	contentKey, err := contentcrypto.Initialize(ctx, pool, store, keyPath)
+	var contentKey *contentcrypto.Key
+	if keyPath := os.Getenv("CONTENT_KEY_FILE"); keyPath != "" {
+		// Explicit compatibility option for non-Docker deployments.
+		contentKey, err = contentcrypto.Initialize(ctx, pool, store, keyPath)
+	} else {
+		contentKey, err = contentcrypto.InitializeSecrets(ctx, pool, store,
+			"/run/secrets/content_public_key", "/run/secrets/content_private_key")
+	}
 	if err != nil {
 		return fmt.Errorf("content encryption initialization: %w", err)
 	}

@@ -20,10 +20,10 @@ def package(version, image, output):
         'compose.https.yaml', 'scripts/deploy-https.sh', 'scripts/familychat.py',
         'deploy/nginx/default.conf.template')}
     compose = (ROOT / 'compose.yaml').read_text()
-    if compose.count('    build: .\n') != 2:
-        raise ValueError('expected API and worker build declarations')
+    if compose.count('    build: .\n') != 3:
+        raise ValueError('expected API, worker and key-setup build declarations')
     files['compose.yaml'] = compose.replace('    build: .\n', f'    image: {image}\n').encode()
-    files['release.json'] = (json.dumps({'version': version, 'image': image, 'content_encryption': 1,
+    files['release.json'] = (json.dumps({'version': version, 'image': image, 'content_encryption': 2,
                                        'repository': 'balamutik/familychat-server'}, indent=2)+'\n').encode()
     output.mkdir(parents=True, exist_ok=True)
     archive_path = output / 'familychat-server.tar.gz'

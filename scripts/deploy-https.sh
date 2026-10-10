@@ -260,12 +260,17 @@ spec.loader.exec_module(module)
 module.prepare_managed_upgrade(release)
 PYTHON
     # Stop the previous writer/preview worker before encrypting legacy storage.
-    compose stop api worker
     if [[ "$NO_BUILD" == true ]]; then
-        compose up -d --no-build api worker turn nginx
+        compose --profile tools pull key-setup
     else
-        compose up -d --build api worker turn nginx
+        compose build api worker key-setup
     fi
+    compose stop api worker
+    compose up -d --wait postgres
+    # Import the original v2.0 key, or create the first pair for a new database.
+    # Do this before mounting the two read-only Docker secrets into the API.
+    compose run --rm --no-deps key-setup
+    compose up -d --no-build api worker turn nginx
 
     if [[ "$MODE" == letsencrypt ]]; then
         issued=true

@@ -136,8 +136,33 @@ func TestLegacyMigrationResumesAndPreservesKey(t *testing.T) {
 	if _, err = Initialize(ctx, db, store, path); err != nil {
 		t.Fatalf("repeat: %v", err)
 	}
+	secretsDir := filepath.Join(t.TempDir(), "secrets")
+	if err = PrepareSecrets(ctx, db, secretsDir, path); err != nil {
+		t.Fatal(err)
+	}
+	public, private := filepath.Join(secretsDir, PublicSecretName), filepath.Join(secretsDir, PrivateSecretName)
+	fromSecrets, err := InitializeSecrets(ctx, db, store, public, private)
+	if err != nil || fromSecrets.ID != key.ID {
+		t.Fatal("secret migration changed key", err)
+	}
+	opened.Reset()
+	if err = fromSecrets.Decrypt(&opened, bytes.NewReader(store.data["original.fc1"]), "file:chat"); err != nil || !bytes.Equal(opened.Bytes(), original) {
+		t.Fatal("secret key cannot read migrated file", err)
+	}
+	if err = PrepareSecrets(ctx, db, secretsDir, path); err != nil {
+		t.Fatal("repeat setup failed", err)
+	}
 	if err = os.Remove(path); err != nil {
 		t.Fatal(err)
+	}
+	if _, err = InitializeSecrets(ctx, db, store, public, private); err != nil {
+		t.Fatal("secrets depend on legacy volume", err)
+	}
+	if err = os.Remove(private); err != nil {
+		t.Fatal(err)
+	}
+	if err = PrepareSecrets(ctx, db, secretsDir, path); err == nil {
+		t.Fatal("lost established key was replaced")
 	}
 	if _, err = Initialize(ctx, db, store, path); err == nil {
 		t.Fatal("lost key silently replaced")

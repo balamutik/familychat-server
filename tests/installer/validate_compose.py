@@ -18,7 +18,7 @@ with tempfile.TemporaryDirectory() as temp:
     release = root / 'release'
     installer.extract_bundle(Path(sys.argv[1]).read_bytes(), release)
     installer.link_state(root / 'state', release)
-    result = installer.compose(root / 'state', release, state, 'config', '--format', 'json', capture_output=True, text=True)
+    result = installer.compose(root / 'state', release, state, '--profile', 'tools', 'config', '--format', 'json', capture_output=True, text=True)
     config = json.loads(result.stdout)
     assert config['name'] == 'familychat'
     assert config['services']['api']['image'] == config['services']['worker']['image']
@@ -30,6 +30,12 @@ with tempfile.TemporaryDirectory() as temp:
     assert config['volumes']['s3_data']['name'] == 'familychat_s3_data'
     assert config['volumes']['encryption_keys']['name'] == 'familychat_encryption_keys'
     assert config['services']['worker']['depends_on']['api']['condition'] == 'service_healthy'
-    assert any(v.get('source') == 'encryption_keys' for v in config['services']['api']['volumes'])
+    assert not config['services']['api'].get('volumes')
+    assert config['services']['key-setup']['image'] == config['services']['api']['image']
+    assert any(v.get('source') == 'encryption_keys' and v.get('read_only') for v in config['services']['key-setup']['volumes'])
+    assert {s['source'] for s in config['services']['api']['secrets']} >= {'content_public_key', 'content_private_key'}
+    assert not config['services']['worker'].get('secrets')
+    for name in ('public', 'private'):
+        assert config['secrets']['content_' + name + '_key']['file'] == str(release / ('secrets/content-' + name + '-key.txt'))
     assert config['secrets']['admin_password']['file'] == str(release / 'secrets/admin-password.txt')
 print('Release Compose valid: fixed image, stable volumes, HTTPS-only API, generated secrets.')

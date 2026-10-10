@@ -21,6 +21,14 @@ type Store interface {
 // interrupted conversion can safely resume. It never serves a mixed plaintext
 // and ciphertext database, or generates a replacement key for an existing one.
 func Initialize(ctx context.Context, db *pgxpool.Pool, store Store, path string) (*Key, error) {
+	return initialize(ctx, db, store, func(expected string) (*Key, error) { return LoadOrCreate(path, expected) })
+}
+
+func InitializeSecrets(ctx context.Context, db *pgxpool.Pool, store Store, publicPath, privatePath string) (*Key, error) {
+	return initialize(ctx, db, store, func(expected string) (*Key, error) { return LoadSecrets(publicPath, privatePath, expected) })
+}
+
+func initialize(ctx context.Context, db *pgxpool.Pool, store Store, load func(string) (*Key, error)) (*Key, error) {
 	conn, err := db.Acquire(ctx)
 	if err != nil {
 		return nil, err
@@ -35,7 +43,7 @@ func Initialize(ctx context.Context, db *pgxpool.Pool, store Store, path string)
 	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return nil, err
 	}
-	key, err := LoadOrCreate(path, expected)
+	key, err := load(expected)
 	if err != nil {
 		return nil, err
 	}

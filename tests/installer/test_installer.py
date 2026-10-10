@@ -247,7 +247,7 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual('v1.0.0', manifest['version'])
         compose = (self.root/'compose.yaml').read_text()
         self.assertNotIn('build:', compose)
-        self.assertEqual(2, compose.count('image: ghcr.io/balamutik/familychat-server@sha256:'))
+        self.assertEqual(3, compose.count('image: ghcr.io/balamutik/familychat-server@sha256:'))
         self.assertFalse((self.root/'.env').exists())
         self.assertFalse((self.root/'internal').exists())
 

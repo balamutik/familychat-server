@@ -49,10 +49,18 @@ services:
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-localhost}
       ADMIN_LOGIN: ${ADMIN_LOGIN:-admin}
       ADMIN_PASSWORD_FILE: /run/secrets/admin_password
-    volumes:
-      - encryption_keys:/var/lib/familychat/crypto
     secrets:
       - admin_password
+      - source: content_public_key
+        target: content_public_key
+        uid: '10001'
+        gid: '10001'
+        mode: 0400
+      - source: content_private_key
+        target: content_private_key
+        uid: '10001'
+        gid: '10001'
+        mode: 0400
     ports:
       - "${API_BIND_HOST:-127.0.0.1}:8080:8080"
     depends_on:
@@ -65,6 +73,25 @@ services:
       retries: 10
       start_period: 24h
     restart: unless-stopped
+
+  # One-shot preparation only; the running API reads Docker secret mounts.
+  key-setup:
+    build: .
+    profiles: [tools]
+    command: ["prepare-content-secrets"]
+    user: "0:0"
+    read_only: true
+    environment: *server_env
+    volumes:
+      - type: bind
+        source: ./secrets
+        target: /run/content-secrets
+      - type: volume
+        source: encryption_keys
+        target: /legacy-keys
+        read_only: true
+    depends_on:
+      postgres: {condition: service_healthy}
 
   worker:
     build: .
@@ -103,6 +130,10 @@ services:
     restart: unless-stopped
 
 secrets:
+  content_public_key:
+    file: ./secrets/content-public-key.txt
+  content_private_key:
+    file: ./secrets/content-private-key.txt
   admin_password:
     file: ./secrets/admin-password.txt
 volumes:

@@ -396,7 +396,7 @@ def main(argv=None):
             state = load_state(root)
         if args.command in ('install', 'update'):
             if args.command == 'update':
-                print('Обновление применяет миграции БД. Сохраните согласованную резервную копию PostgreSQL, файлов и тома encryption_keys.')
+                print('Обновление применяет миграции БД. Сохраните согласованную резервную копию PostgreSQL, файлов и каталога secrets (для v2.0.0 также тома encryption_keys).')
                 if prompt('Резервная копия готова, продолжить обновление? [y/N]').lower() not in ('y', 'yes', 'д', 'да'):
                     raise InstallError('Обновление отменено.')
             check_network(state['domain'], state['public_ip'], fresh=False)

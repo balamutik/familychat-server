@@ -20,7 +20,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY --from=go-build /out/familychat /usr/local/bin/familychat
 COPY --from=admin-build /src/admin/dist /app/admin
 ENV ADMIN_STATIC_DIR=/app/admin
-RUN mkdir -p /var/lib/familychat/crypto && chown -R 10001:10001 /var/lib/familychat && chmod 700 /var/lib/familychat/crypto
 USER 10001:10001
 EXPOSE 8080
 ENTRYPOINT ["/usr/local/bin/familychat"]
