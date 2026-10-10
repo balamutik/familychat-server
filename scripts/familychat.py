@@ -228,14 +228,19 @@ def activate(root, candidate, state):
 
 
 def prompt(message):
-    # Buffered read/write mode requires seek support, which terminals do not have.
-    with open('/dev/tty', 'w', encoding='utf-8') as output, open('/dev/tty', 'r', encoding='utf-8') as source:
-        output.write(message + ' ')
-        output.flush()
-        value = source.readline()
-    if not value:
-        raise InstallError('Ввод прерван.')
-    return value.strip()
+    # A byte-wise terminal erase can leave half of a UTF-8 character. Read one
+    # raw line at a time so a decoding failure never consumes the next answer.
+    with open('/dev/tty', 'w', encoding='utf-8') as output, open('/dev/tty', 'rb', buffering=0) as source:
+        while True:
+            output.write(message + ' ')
+            output.flush()
+            raw = source.readline()
+            if not raw:
+                raise InstallError('Ввод прерван.')
+            try:
+                return raw.decode('utf-8').strip()
+            except UnicodeDecodeError:
+                output.write('Некорректная кодировка ввода. Переключите раскладку и введите ответ заново.\n')
 
 
 def require_system():
