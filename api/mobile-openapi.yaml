@@ -97,6 +97,24 @@ components:
           minLength: 12
           maxLength: 128
           description: Ограничение по длине относится к Unicode-символам; максимум 512 байт UTF-8.
+    RegistrationCredentials:
+      type: object
+      additionalProperties: false
+      required: [login, password]
+      properties:
+        login:
+          type: string
+          pattern: '^[A-Za-z0-9_]{3,32}$'
+          description: Логин нормализуется сервером в нижний регистр.
+        password:
+          type: string
+          minLength: 12
+          maxLength: 128
+          description: Ограничение по длине относится к Unicode-символам; максимум 512 байт UTF-8.
+        display_name:
+          type: string
+          maxLength: 64
+          description: Необязательное имя в одну строку; пробелы по краям удаляются. Пустое имя означает отображение логина. Имя не обязано быть уникальным.
     ChangePassword:
       type: object
       additionalProperties: false
@@ -110,6 +128,7 @@ components:
       properties:
         id: {$ref: '#/components/schemas/UUID'}
         login: {type: string}
+        display_name: {type: string, maxLength: 64, description: Отображаемое имя; если отсутствует или пустое, показывайте login.}
         role: {type: string, enum: [user, admin]}
         avatar_url: {type: string, description: Относительный публичный URL текущего аватара; отсутствует, если аватар не задан.}
     UserSearchItem:
@@ -118,6 +137,7 @@ components:
       properties:
         id: {$ref: '#/components/schemas/UUID'}
         login: {type: string}
+        display_name: {type: string, maxLength: 64, description: Отображаемое имя; если отсутствует или пустое, показывайте login.}
         avatar_url: {type: string, description: Относительный публичный URL, если аватар задан.}
     LoginResult:
       type: object
@@ -142,13 +162,13 @@ components:
         kind: {type: string, enum: [direct, group]}
         title:
           type: string
-          description: В личном чате это актуальный логин собеседника.
+          description: В личном чате это актуальное отображаемое имя собеседника или его логин, если имя не задано.
         role: {type: string, enum: [owner, admin, member]}
         avatar_url: {type: string, description: Публичный аватар собеседника в личном чате; отсутствует для группы и профиля без аватара.}
         unread_count: {type: integer, format: int64, minimum: 0, description: Число сообщений других участников после последней отмеченной позиции прочтения.}
         last_message_preview: {type: string, description: Первые 160 символов текста последнего сообщения или имя первого вложения; отсутствует в пустом чате.}
         last_message_at: {type: string, format: date-time, description: Время последнего сообщения; отсутствует в пустом чате.}
-        last_message_sender: {type: string, description: Логин отправителя последнего сообщения; используется для превью группы.}
+        last_message_sender: {type: string, description: Отображаемое имя отправителя последнего сообщения или логин; используется для превью группы.}
         presence:
           $ref: '#/components/schemas/UserPresence'
           description: Присутствие собеседника; только для личного чата. Онлайн означает хотя бы одно активное WebSocket-подключение.
@@ -167,6 +187,7 @@ components:
       properties:
         id: {$ref: '#/components/schemas/UUID'}
         login: {type: string}
+        display_name: {type: string, maxLength: 64, description: Отображаемое имя; если отсутствует или пустое, показывайте login.}
         role: {type: string, enum: [owner, admin, member]}
         avatar_url: {type: string, description: Относительный публичный URL, если аватар задан и пользователь активен.}
     AvatarResult:
@@ -325,7 +346,7 @@ components:
         id: {type: integer, format: int64, description: Глобальный курсор событий.}
         type:
           type: string
-          enum: [message, receipt, preview, file_expired, call_ringing, call_accepted, call_rejected, call_cancelled, call_ended, call_timeout, call_server_restart]
+          enum: [message, receipt, preview, file_expired, profile_updated, call_ringing, call_accepted, call_rejected, call_cancelled, call_ended, call_timeout, call_server_restart]
         chat_id: {$ref: '#/components/schemas/UUID'}
         occurred_at: {type: string, format: date-time}
         data:
@@ -333,10 +354,10 @@ components:
           description: |
             message = {message_id, seq}; receipt = {user_id, delivered_seq,
             read_seq}; preview = {attachment_id, state}; file_expired =
-            {attachment_id}; call_ringing = {call_id, caller_id,
+            {attachment_id}; profile_updated = {user_id}; call_ringing = {call_id, caller_id,
             callee_id, kind}; call_accepted/rejected/cancelled/ended =
             {call_id, state}; call_timeout/call_server_restart = {call_id}. Для полного состояния
-            получите сообщение или звонок через HTTP.
+            получите сообщение, профиль, список чатов или звонок через HTTP.
     Signal:
       type: object
       required: [type, call_id, data]
@@ -522,7 +543,7 @@ paths:
         required: true
         content:
           application/json:
-            schema: {$ref: '#/components/schemas/Credentials'}
+            schema: {$ref: '#/components/schemas/RegistrationCredentials'}
       responses:
         '201':
           description: Созданный пользователь.
@@ -666,7 +687,7 @@ paths:
         - name: q
           in: query
           required: true
-          schema: {type: string, minLength: 2, maxLength: 32}
+          schema: {type: string, minLength: 2, maxLength: 64}
       responses:
         '200':
           description: Не более 20 совпадений; текущий пользователь исключён.
@@ -679,6 +700,30 @@ paths:
                   users:
                     type: array
                     items: {$ref: '#/components/schemas/UserSearchItem'}
+        '400': {$ref: '#/components/responses/BadRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /users/me:
+    patch:
+      tags: [Users]
+      operationId: updateDisplayName
+      summary: Изменить отображаемое имя текущего пользователя
+      description: Пустая строка очищает имя. Вход по логину не меняется. Участникам общих чатов отправляется событие profile_updated с user_id.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [display_name]
+              properties:
+                display_name: {type: string, maxLength: 64}
+      responses:
+        '200':
+          description: Обновлённый профиль.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/User'}
         '400': {$ref: '#/components/responses/BadRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
   /users/me/avatar:

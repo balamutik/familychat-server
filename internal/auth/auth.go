@@ -10,6 +10,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -25,11 +27,12 @@ var ErrInvalidInput = errors.New("invalid input")
 var loginPattern = regexp.MustCompile(`^[A-Za-z0-9_]{3,32}$`)
 
 type Principal struct {
-	UserID    string `json:"id"`
-	SessionID string `json:"-"`
-	Login     string `json:"login"`
-	Role      string `json:"role"`
-	AvatarURL string `json:"avatar_url,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+	UserID      string `json:"id"`
+	SessionID   string `json:"-"`
+	Login       string `json:"login"`
+	Role        string `json:"role"`
+	AvatarURL   string `json:"avatar_url,omitempty"`
 }
 
 type Service struct {
@@ -78,10 +81,10 @@ func (s *Service) Authenticate(ctx context.Context, token string) (Principal, er
 	}
 	h := sha256.Sum256([]byte(token))
 	var p Principal
-	err := s.DB.QueryRow(ctx, `SELECT u.id::text,s.id::text,u.login,u.role,
+	err := s.DB.QueryRow(ctx, `SELECT u.id::text,s.id::text,u.login,u.role,u.display_name,
 		CASE WHEN u.avatar_key IS NULL THEN '' ELSE '/api/v1/users/'||u.id::text||'/avatar' END
 		FROM sessions s JOIN users u ON u.id=s.user_id
-		WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>now() AND NOT u.disabled`, h[:]).Scan(&p.UserID, &p.SessionID, &p.Login, &p.Role, &p.AvatarURL)
+		WHERE s.token_hash=$1 AND s.revoked_at IS NULL AND s.expires_at>now() AND NOT u.disabled`, h[:]).Scan(&p.UserID, &p.SessionID, &p.Login, &p.Role, &p.DisplayName, &p.AvatarURL)
 	if err != nil {
 		return Principal{}, ErrUnauthenticated
 	}
@@ -105,8 +108,29 @@ func NormalizeLogin(login string) (string, error) {
 	return strings.ToLower(login), nil
 }
 
-func (s *Service) Register(ctx context.Context, login, password string) (Principal, error) {
-	login, err := NormalizeLogin(login)
+// NormalizeDisplayName keeps presentation separate from the unique login.
+func NormalizeDisplayName(value string) (string, error) {
+	if !utf8.ValidString(value) {
+		return "", ErrInvalidInput
+	}
+	value = strings.TrimSpace(value)
+	if utf8.RuneCountInString(value) > 64 {
+		return "", ErrInvalidInput
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) || r == '\u2028' || r == '\u2029' {
+			return "", ErrInvalidInput
+		}
+	}
+	return value, nil
+}
+
+func (s *Service) Register(ctx context.Context, login, password, displayName string) (Principal, error) {
+	displayName, err := NormalizeDisplayName(displayName)
+	if err != nil {
+		return Principal{}, err
+	}
+	login, err = NormalizeLogin(login)
 	if err != nil {
 		return Principal{}, err
 	}
@@ -127,7 +151,7 @@ func (s *Service) Register(ctx context.Context, login, password string) (Princip
 		return Principal{}, ErrRegistrationClosed
 	}
 	var p Principal
-	if err := tx.QueryRow(ctx, `INSERT INTO users(login,password_hash) VALUES($1,$2) RETURNING id::text,login,role`, login, hash).Scan(&p.UserID, &p.Login, &p.Role); err != nil {
+	if err := tx.QueryRow(ctx, `INSERT INTO users(login,password_hash,display_name) VALUES($1,$2,$3) RETURNING id::text,login,role,display_name`, login, hash, displayName).Scan(&p.UserID, &p.Login, &p.Role, &p.DisplayName); err != nil {
 		var pgerr *pgconn.PgError
 		if errors.As(err, &pgerr) && pgerr.Code == "23505" {
 			return Principal{}, ErrConflict
@@ -168,9 +192,9 @@ func (s *Service) Login(ctx context.Context, login, password string) (string, Pr
 	}
 	var p Principal
 	var hash string
-	err = s.DB.QueryRow(ctx, `SELECT id::text,login,role,password_hash,
+	err = s.DB.QueryRow(ctx, `SELECT id::text,login,role,password_hash,display_name,
 		CASE WHEN avatar_key IS NULL THEN '' ELSE '/api/v1/users/'||id::text||'/avatar' END
-		FROM users WHERE login=$1 AND NOT disabled`, login).Scan(&p.UserID, &p.Login, &p.Role, &hash, &p.AvatarURL)
+		FROM users WHERE login=$1 AND NOT disabled`, login).Scan(&p.UserID, &p.Login, &p.Role, &hash, &p.DisplayName, &p.AvatarURL)
 	if err != nil {
 		return "", Principal{}, ErrInvalidCredentials
 	}

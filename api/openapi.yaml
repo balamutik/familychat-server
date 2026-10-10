@@ -43,6 +43,12 @@ components:
       properties:
         login: {type: string, pattern: '^[A-Za-z0-9_]{3,32}$'}
         password: {type: string, minLength: 12}
+    RegistrationCredentials:
+      allOf:
+        - $ref: '#/components/schemas/Credentials'
+        - type: object
+          properties:
+            display_name: {type: string, maxLength: 64, description: Optional single-line name. Empty uses login.}
     UUID:
       type: string
       format: uuid
@@ -63,6 +69,7 @@ components:
       properties:
         id: {$ref: '#/components/schemas/UUID'}
         login: {type: string}
+        display_name: {type: string, maxLength: 64, description: Optional display name; use login when empty or absent.}
         role: {type: string, enum: [admin, user]}
         avatar_url: {type: string, description: Optional relative public URL.}
     MessageInput:
@@ -192,7 +199,11 @@ paths:
     post:
       security: []
       summary: Self-register when the administrator has enabled it
-      requestBody: {$ref: '#/components/requestBodies/Credentials'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/RegistrationCredentials'}
       responses: {'201': {description: Account created}, '403': {description: Registration disabled}}
   /auth/login:
     post:
@@ -243,6 +254,28 @@ paths:
     post:
       summary: Issue a 30-second, single-use WebSocket ticket
       responses: {'201': {description: Ticket}}
+  /users/me:
+    patch:
+      summary: Update the current user's display name
+      description: Empty clears the name and restores login display. Emits profile_updated events with user_id to shared chats.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [display_name]
+              properties:
+                display_name: {type: string, maxLength: 64}
+      responses:
+        '200':
+          description: Updated profile
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/User'}
+        '400': {description: Invalid display name}
+        '401': {description: Unauthorized}
   /users/me/avatar:
     put:
       summary: Replace own avatar with a validated common image format
@@ -354,13 +387,13 @@ paths:
       responses: {'200': {description: Updated}}
   /users:
     get:
-      summary: Find active users by login prefix while authenticated
+      summary: Find active users by login or display-name prefix while authenticated
       parameters:
         - name: q
           in: query
           required: true
-          schema: {type: string, minLength: 2, maxLength: 32}
-      responses: {'200': {description: Up to 20 user IDs and logins}}
+          schema: {type: string, minLength: 2, maxLength: 64}
+      responses: {'200': {description: Up to 20 user IDs, logins and optional display names}}
   /chats/direct:
     post:
       summary: Find or create a direct chat

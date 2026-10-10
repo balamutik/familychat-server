@@ -94,11 +94,19 @@ func registerAuth(mux *http.ServeMux, d Dependencies) {
 			writeError(w, 429, "rate_limited")
 			return
 		}
-		var c credentials
+		var c struct {
+			credentials
+			DisplayName string `json:"display_name"`
+		}
 		if !decodeJSON(w, r, &c) {
 			return
 		}
-		p, err := d.Auth.Register(r.Context(), c.Login, c.Password)
+		name, err := auth.NormalizeDisplayName(c.DisplayName)
+		if err != nil {
+			writeError(w, 400, "invalid_display_name")
+			return
+		}
+		p, err := d.Auth.Register(r.Context(), c.Login, c.Password, name)
 		switch {
 		case errors.Is(err, auth.ErrRegistrationClosed):
 			writeError(w, 403, "registration_closed")

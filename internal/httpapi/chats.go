@@ -58,10 +58,10 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 			return
 		}
 		var active bool
-		var peerLogin string
+		var peerName string
 		var peerHasAvatar bool
 		var peerLastSeen *time.Time
-		if err := d.DB.QueryRow(r.Context(), `SELECT NOT disabled,login,avatar_key IS NOT NULL,last_seen_at FROM users WHERE id=$1`, body.UserID).Scan(&active, &peerLogin, &peerHasAvatar, &peerLastSeen); err != nil || !active {
+		if err := d.DB.QueryRow(r.Context(), `SELECT NOT disabled,COALESCE(NULLIF(display_name,''),login),avatar_key IS NOT NULL,last_seen_at FROM users WHERE id=$1`, body.UserID).Scan(&active, &peerName, &peerHasAvatar, &peerLastSeen); err != nil || !active {
 			writeError(w, 404, "not_found")
 			return
 		}
@@ -101,7 +101,7 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		if created {
 			status = 201
 		}
-		v := chatView{ID: id, Kind: "direct", Title: peerLogin, Role: "member", peerID: body.UserID}
+		v := chatView{ID: id, Kind: "direct", Title: peerName, Role: "member", peerID: body.UserID}
 		v.setPresence(d, peerLastSeen)
 		if peerHasAvatar {
 			v.AvatarURL = avatarURL(body.UserID)
@@ -151,7 +151,7 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 	})
 	protected("GET /api/v1/chats", func(w http.ResponseWriter, r *http.Request) {
 		p, _ := auth.PrincipalFrom(r.Context())
-		rows, err := d.DB.Query(r.Context(), `SELECT c.id::text,c.kind,CASE WHEN c.kind='direct' THEN peer.login ELSE c.title END,m.role,
+		rows, err := d.DB.Query(r.Context(), `SELECT c.id::text,c.kind,CASE WHEN c.kind='direct' THEN COALESCE(NULLIF(peer.display_name,''),peer.login) ELSE c.title END,m.role,
 			CASE WHEN peer.avatar_key IS NOT NULL AND NOT peer.disabled THEN '/api/v1/users/'||peer.id::text||'/avatar' ELSE '' END,
 			(SELECT count(*) FROM messages msg WHERE msg.chat_id=c.id AND msg.seq>m.read_seq AND msg.sender_id<>$1),
 			recent.preview,recent.created_at,recent.sender_login,COALESCE(peer.id::text,''),COALESCE(peer.disabled,false),peer.last_seen_at
@@ -159,7 +159,7 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 			LEFT JOIN users peer ON peer.id=CASE WHEN c.kind='direct' THEN CASE WHEN c.direct_user_low=$1 THEN c.direct_user_high ELSE c.direct_user_low END ELSE NULL END
 			LEFT JOIN LATERAL (SELECT COALESCE(NULLIF(LEFT(BTRIM(msg.body),160),''),
 				(SELECT a.filename FROM message_attachments ma JOIN attachments a ON a.id=ma.attachment_id WHERE ma.message_id=msg.id ORDER BY a.created_at LIMIT 1),
-				'Вложение') AS preview,msg.created_at::text AS created_at,msg.created_at AS sort_at,sender.login AS sender_login
+				'Вложение') AS preview,msg.created_at::text AS created_at,msg.created_at AS sort_at,COALESCE(NULLIF(sender.display_name,''),sender.login) AS sender_login
 				FROM messages msg JOIN users sender ON sender.id=msg.sender_id WHERE msg.chat_id=c.id ORDER BY msg.seq DESC LIMIT 1) recent ON true
 			WHERE m.user_id=$1 AND c.deleted_at IS NULL ORDER BY COALESCE(recent.sort_at,c.created_at) DESC,c.id DESC LIMIT $2`, p.UserID, parseLimit(r))
 		if err != nil {
@@ -194,7 +194,7 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		p, _ := auth.PrincipalFrom(r.Context())
 		var v chatView
 		var lastSeen *time.Time
-		err := d.DB.QueryRow(r.Context(), `SELECT c.id::text,c.kind,CASE WHEN c.kind='direct' THEN peer.login ELSE c.title END,m.role,
+		err := d.DB.QueryRow(r.Context(), `SELECT c.id::text,c.kind,CASE WHEN c.kind='direct' THEN COALESCE(NULLIF(peer.display_name,''),peer.login) ELSE c.title END,m.role,
 			CASE WHEN peer.avatar_key IS NOT NULL AND NOT peer.disabled THEN '/api/v1/users/'||peer.id::text||'/avatar' ELSE '' END,
 			(SELECT count(*) FROM messages msg WHERE msg.chat_id=c.id AND msg.seq>m.read_seq AND msg.sender_id<>$2),
 			recent.preview,recent.created_at,recent.sender_login,COALESCE(peer.id::text,''),COALESCE(peer.disabled,false),peer.last_seen_at
@@ -202,7 +202,7 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 			LEFT JOIN users peer ON peer.id=CASE WHEN c.kind='direct' THEN CASE WHEN c.direct_user_low=$2 THEN c.direct_user_high ELSE c.direct_user_low END ELSE NULL END
 			LEFT JOIN LATERAL (SELECT COALESCE(NULLIF(LEFT(BTRIM(msg.body),160),''),
 				(SELECT a.filename FROM message_attachments ma JOIN attachments a ON a.id=ma.attachment_id WHERE ma.message_id=msg.id ORDER BY a.created_at LIMIT 1),
-				'Вложение') AS preview,msg.created_at::text AS created_at,sender.login AS sender_login
+				'Вложение') AS preview,msg.created_at::text AS created_at,COALESCE(NULLIF(sender.display_name,''),sender.login) AS sender_login
 				FROM messages msg JOIN users sender ON sender.id=msg.sender_id WHERE msg.chat_id=c.id ORDER BY msg.seq DESC LIMIT 1) recent ON true
 			WHERE c.id=$1 AND m.user_id=$2 AND c.deleted_at IS NULL`, id, p.UserID).Scan(&v.ID, &v.Kind, &v.Title, &v.Role, &v.AvatarURL, &v.UnreadCount,
 			&v.LastMessagePreview, &v.LastMessageAt, &v.LastMessageSender, &v.peerID, &v.peerDisabled, &lastSeen)
@@ -225,23 +225,24 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 			writeError(w, 404, "not_found")
 			return
 		}
-		rows, err := d.DB.Query(r.Context(), `SELECT u.id::text,u.login,cm.role,u.avatar_key IS NOT NULL AND NOT u.disabled FROM chat_members cm JOIN users u ON u.id=cm.user_id WHERE cm.chat_id=$1 ORDER BY u.login`, id)
+		rows, err := d.DB.Query(r.Context(), `SELECT u.id::text,u.login,u.display_name,cm.role,u.avatar_key IS NOT NULL AND NOT u.disabled FROM chat_members cm JOIN users u ON u.id=cm.user_id WHERE cm.chat_id=$1 ORDER BY u.login`, id)
 		if err != nil {
 			writeError(w, 500, "internal")
 			return
 		}
 		defer rows.Close()
 		type member struct {
-			ID        string `json:"id"`
-			Login     string `json:"login"`
-			Role      string `json:"role"`
-			AvatarURL string `json:"avatar_url,omitempty"`
+			DisplayName string `json:"display_name,omitempty"`
+			ID          string `json:"id"`
+			Login       string `json:"login"`
+			Role        string `json:"role"`
+			AvatarURL   string `json:"avatar_url,omitempty"`
 		}
 		members := []member{}
 		for rows.Next() {
 			var m member
 			var hasAvatar bool
-			if err := rows.Scan(&m.ID, &m.Login, &m.Role, &hasAvatar); err != nil {
+			if err := rows.Scan(&m.ID, &m.Login, &m.DisplayName, &m.Role, &hasAvatar); err != nil {
 				writeError(w, 500, "internal")
 				return
 			}

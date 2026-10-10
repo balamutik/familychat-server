@@ -33,7 +33,7 @@ func registerCallHistory(mux *http.ServeMux, d Dependencies) {
 		if before != "" {
 			cursor = before
 		}
-		rows, err := d.DB.Query(r.Context(), `SELECT c.id::text,c.chat_id::text,u.id::text,u.login,CASE WHEN u.avatar_key IS NOT NULL AND NOT u.disabled THEN '/api/v1/users/' || u.id::text || '/avatar' ELSE NULL END,c.kind,
+		rows, err := d.DB.Query(r.Context(), `SELECT c.id::text,c.chat_id::text,u.id::text,COALESCE(NULLIF(u.display_name,''),u.login),CASE WHEN u.avatar_key IS NOT NULL AND NOT u.disabled THEN '/api/v1/users/' || u.id::text || '/avatar' ELSE NULL END,c.kind,
    CASE WHEN c.caller_id=$1 THEN 'outgoing' ELSE 'incoming' END,
    CASE WHEN c.state IN ('missed','rejected','cancelled') THEN c.state
         WHEN c.connected_at IS NOT NULL THEN 'completed'
