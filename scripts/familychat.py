@@ -364,10 +364,59 @@ def bootstrap_admin(root, release, state):
     return created
 
 
+def configure_push(root, release, state):
+    print('Настройка уведомлений и системных звонков iOS. API и worker будут перезапущены.')
+    key_path = Path(prompt('Путь к APNs-ключу Apple (.p8):')).expanduser()
+    key_id = prompt('Key ID (10 символов):')
+    team_id = prompt('Team ID (10 символов):')
+    topic = prompt('Bundle ID [com.familychat.FamilyChatSelfhosted]:') or 'com.familychat.FamilyChatSelfhosted'
+    mode = prompt('Сборка: development (Xcode) или production (TestFlight/App Store):').lower()
+    if not re.fullmatch(r'[A-Z0-9]{10}', key_id) or not re.fullmatch(r'[A-Z0-9]{10}', team_id):
+        raise InstallError('Key ID и Team ID должны содержать 10 латинских заглавных букв или цифр.')
+    if not re.fullmatch(r'[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+', topic) or len(topic) > 255:
+        raise InstallError('Некорректный Bundle ID.')
+    if mode not in ('development', 'production'):
+        raise InstallError('Укажите development или production.')
+    with key_path.open('rb') as source:
+        data = source.read(16385)
+    if len(data) > 16384 or not data.startswith(b'-----BEGIN PRIVATE KEY-----'):
+        raise InstallError('Нужен незашифрованный APNs-ключ Apple в формате .p8 (PKCS#8).')
+    # Validate the exact bytes we will install, without printing private material.
+    checked = run(['openssl', 'pkey', '-pubout', '-outform', 'DER'], input=data, capture_output=True).stdout
+    p256_prefix = bytes.fromhex('3059301306072a8648ce3d020106082a8648ce3d03010703420004')
+    if len(checked) != 91 or not checked.startswith(p256_prefix):
+        raise InstallError('APNs требует приватный ключ EC P-256.')
+    key_name = 'apns-' + hashlib.sha256(data).hexdigest()[:16] + '.p8'
+    secret_dir = root / 'secrets'
+    secret_dir.mkdir(exist_ok=True, mode=0o700)
+    secret_dir.chmod(0o700)
+    # Compose bind mounts retain host mode. Only root can traverse secrets on the host;
+    # the non-root worker must be able to read the single mounted file in its container.
+    atomic_write(secret_dir / key_name, data.decode('ascii'), 0o644)
+    values = {'APNS_KEY_FILE': './secrets/' + key_name, 'APNS_KEY_ID': key_id,
+              'APNS_TEAM_ID': team_id, 'APNS_TOPIC': topic,
+              'APNS_SANDBOX': 'true' if mode == 'development' else 'false'}
+    env_file = root / '.env'
+    previous = env_file.read_text()
+    lines = [line for line in previous.splitlines() if line.partition('=')[0] not in values]
+    configured = '\n'.join(lines) + '\n' + ''.join(f'{key}={value}\n' for key, value in values.items())
+    atomic_write(env_file, configured)
+    try:
+        compose(root, release, state, 'config', '-q')
+    except Exception:
+        atomic_write(env_file, previous)
+        raise
+    # Retain the selected configuration if Docker fails; rerunning this command is safe.
+    compose(root, release, state, 'up', '-d', '--no-deps', '--force-recreate', '--wait', 'api', 'worker')
+    # nginx resolves the API address at startup; a recreated container may get a new IP.
+    compose(root, release, state, 'exec', '-T', 'nginx', 'nginx', '-s', 'reload')
+    print('APNs настроен. Откройте обновлённое приложение и разрешите уведомления и микрофон.')
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Установка и обслуживание FamilyChat')
     parser.add_argument('--root', type=Path, default=DEFAULT_ROOT, help=argparse.SUPPRESS)
-    parser.add_argument('command', choices=('install', 'update', 'status', 'logs', 'renew'))
+    parser.add_argument('command', choices=('install', 'update', 'status', 'logs', 'renew', 'configure-push'))
     parser.add_argument('--version', help='Конкретный релиз vX.Y.Z (по умолчанию последний)')
     args = parser.parse_args(argv)
     distro, codename = require_system()
@@ -437,6 +486,8 @@ def main(argv=None):
                     print('Не завершена активация релиза: ' + state['pending_version'])
                 print('Версия: ' + json.loads((release / 'release.json').read_text())['version'])
                 compose(root, release, state, 'ps')
+            elif args.command == 'configure-push':
+                configure_push(root, release, state)
             elif args.command == 'logs':
                 compose(root, release, state, 'logs', '--tail', '100', '-f', 'api', 'worker', 'nginx')
             else:
