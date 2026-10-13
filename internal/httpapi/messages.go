@@ -172,9 +172,9 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 		}
 		if d.PushEnabled {
 			_, err = tx.Exec(r.Context(), `INSERT INTO push_jobs(device_id,kind,payload)
-			SELECT d.id,'alert',jsonb_build_object('aps',jsonb_build_object('alert',jsonb_build_object('title','FamilyChat','body','Новое сообщение'),'sound','default'),
+			SELECT d.id,'alert',jsonb_build_object('aps',jsonb_build_object('alert',jsonb_build_object('title',COALESCE(NULLIF(sender.display_name,''),sender.login),'body','Новое сообщение'),'sound','default'),
 			'server_id',d.client_server_id::text,'chat_id',$1::text,'message_id',$2::text)
-			FROM push_devices d JOIN chat_members cm ON cm.user_id=d.user_id JOIN sessions s ON s.id=d.session_id
+			FROM push_devices d JOIN chat_members cm ON cm.user_id=d.user_id JOIN sessions s ON s.id=d.session_id JOIN users sender ON sender.id=$3
 			WHERE cm.chat_id=$1::uuid AND d.user_id<>$3 AND d.alert_token IS NOT NULL
 			AND s.revoked_at IS NULL AND s.expires_at>now()`, chatID, v.ID, p.UserID)
 		}
