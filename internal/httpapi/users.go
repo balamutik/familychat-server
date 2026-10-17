@@ -51,6 +51,10 @@ func registerUsers(mux *http.ServeMux, d Dependencies) {
 		writeJSON(w, 200, p)
 	})))
 	mux.Handle("GET /api/v1/users", require(d.Auth, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("directory") == "1" {
+			listUserDirectory(w, r, d)
+			return
+		}
 		query := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 		if utf8.RuneCountInString(query) < 2 || utf8.RuneCountInString(query) > 64 {
 			writeError(w, 400, "invalid_query")
