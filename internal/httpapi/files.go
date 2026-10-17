@@ -293,7 +293,7 @@ func authorizedFile(r *http.Request, d Dependencies, id, userID string) (fileMet
 		FROM attachments a JOIN chats c ON c.id=a.chat_id JOIN chat_members cm ON cm.chat_id=c.id CROSS JOIN settings s
 		WHERE a.id=$1 AND cm.user_id=$2 AND c.deleted_at IS NULL AND
 		a.purged_at IS NULL AND (s.retention_days=0 OR a.created_at>now()-s.retention_days*interval '1 day') AND
-		(EXISTS(SELECT 1 FROM message_attachments ma WHERE ma.attachment_id=a.id)
+		(EXISTS(SELECT 1 FROM message_attachments ma JOIN messages msg ON msg.id=ma.message_id WHERE ma.attachment_id=a.id AND msg.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM message_hidden mh WHERE mh.message_id=msg.id AND mh.user_id=$2))
 		 OR (a.uploader_id=$2 AND NOT EXISTS(SELECT 1 FROM message_attachments ma WHERE ma.attachment_id=a.id)))`, id, userID).Scan(&m.ID, &m.ChatID, &m.ObjectKey, &m.PreviewKey, &m.Filename, &m.ContentType, &m.Size, &m.PreviewState, &m.Encrypted)
 	m.Available = err == nil
 	return m, err

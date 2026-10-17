@@ -265,6 +265,14 @@ func (h *Hub) dispatch(ctx context.Context, ev Event) {
 		return
 	}
 	for _, c := range clients {
+		if ev.Type == "message_hidden" {
+			var target struct {
+				UserID string `json:"user_id"`
+			}
+			if json.Unmarshal(ev.Data, &target) != nil || target.UserID != c.UserID {
+				continue
+			}
+		}
 		active, allowed := h.canReceive(ctx, c, ev.ChatID)
 		if !active {
 			c.Close()
@@ -291,7 +299,7 @@ func (h *Hub) Replay(ctx context.Context, c *Client, after int64) error {
 	if after < 0 {
 		return nil
 	}
-	rows, err := h.db.Query(ctx, `SELECT e.id,e.chat_id::text,e.kind,e.payload,e.created_at FROM events e JOIN chat_members cm ON cm.chat_id=e.chat_id JOIN chats ch ON ch.id=e.chat_id WHERE e.id>$1 AND cm.user_id=$2 AND ch.deleted_at IS NULL ORDER BY e.id LIMIT 100`, after, c.UserID)
+	rows, err := h.db.Query(ctx, `SELECT e.id,e.chat_id::text,e.kind,e.payload,e.created_at FROM events e JOIN chat_members cm ON cm.chat_id=e.chat_id JOIN chats ch ON ch.id=e.chat_id WHERE e.id>$1 AND cm.user_id=$2 AND ch.deleted_at IS NULL AND (e.kind<>'message_hidden' OR e.payload->>'user_id'=$2::text) ORDER BY e.id LIMIT 100`, after, c.UserID)
 	if err != nil {
 		return err
 	}

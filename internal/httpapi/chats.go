@@ -111,7 +111,7 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		}
 		if !created {
 			if err := d.DB.QueryRow(r.Context(), `SELECT count(*) FROM messages msg JOIN chat_members cm ON cm.chat_id=msg.chat_id
-				WHERE cm.chat_id=$1 AND cm.user_id=$2 AND msg.seq>cm.read_seq AND msg.sender_id<>$2`, id, p.UserID).Scan(&v.UnreadCount); err != nil {
+				WHERE cm.chat_id=$1 AND cm.user_id=$2 AND msg.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM message_hidden mh WHERE mh.message_id=msg.id AND mh.user_id=$2) AND msg.seq>cm.read_seq AND msg.sender_id<>$2`, id, p.UserID).Scan(&v.UnreadCount); err != nil {
 				writeError(w, 500, "internal")
 				return
 			}
@@ -156,14 +156,14 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		p, _ := auth.PrincipalFrom(r.Context())
 		rows, err := d.DB.Query(r.Context(), `SELECT c.id::text,c.kind,CASE WHEN c.kind='direct' THEN COALESCE(NULLIF(peer.display_name,''),peer.login) ELSE c.title END,m.role,
 			CASE WHEN peer.avatar_key IS NOT NULL AND NOT peer.disabled THEN '/api/v1/users/'||peer.id::text||'/avatar' ELSE '' END,
-			(SELECT count(*) FROM messages msg WHERE msg.chat_id=c.id AND msg.seq>m.read_seq AND msg.sender_id<>$1),
+			(SELECT count(*) FROM messages msg WHERE msg.chat_id=c.id AND msg.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM message_hidden mh WHERE mh.message_id=msg.id AND mh.user_id=$1) AND msg.seq>m.read_seq AND msg.sender_id<>$1),
 			recent.preview,recent.created_at,recent.sender_login,recent.ciphertext,recent.sender_id,recent.client_id,COALESCE(peer.id::text,''),COALESCE(peer.disabled,false),peer.last_seen_at
 			FROM chats c JOIN chat_members m ON m.chat_id=c.id
 			LEFT JOIN users peer ON peer.id=CASE WHEN c.kind='direct' THEN CASE WHEN c.direct_user_low=$1 THEN c.direct_user_high ELSE c.direct_user_low END ELSE NULL END
 			LEFT JOIN LATERAL (SELECT COALESCE(NULLIF(CASE WHEN msg.encrypted THEN 'Вложение' ELSE LEFT(BTRIM(msg.body),160) END,''),
 				(SELECT a.filename FROM message_attachments ma JOIN attachments a ON a.id=ma.attachment_id WHERE ma.message_id=msg.id ORDER BY a.created_at LIMIT 1),
 				'Вложение') AS preview,msg.created_at::text AS created_at,msg.created_at AS sort_at,COALESCE(NULLIF(sender.display_name,''),sender.login) AS sender_login,CASE WHEN msg.encrypted THEN msg.body ELSE NULL END AS ciphertext,msg.sender_id::text AS sender_id,msg.client_message_id::text AS client_id
-				FROM messages msg JOIN users sender ON sender.id=msg.sender_id WHERE msg.chat_id=c.id ORDER BY msg.seq DESC LIMIT 1) recent ON true
+				FROM messages msg JOIN users sender ON sender.id=msg.sender_id WHERE msg.chat_id=c.id AND msg.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM message_hidden mh WHERE mh.message_id=msg.id AND mh.user_id=$1) ORDER BY msg.seq DESC LIMIT 1) recent ON true
 			WHERE m.user_id=$1 AND c.deleted_at IS NULL ORDER BY COALESCE(recent.sort_at,c.created_at) DESC,c.id DESC LIMIT $2`, p.UserID, parseLimit(r))
 		if err != nil {
 			writeError(w, 500, "internal")
@@ -199,14 +199,14 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		var lastSeen *time.Time
 		err := d.DB.QueryRow(r.Context(), `SELECT c.id::text,c.kind,CASE WHEN c.kind='direct' THEN COALESCE(NULLIF(peer.display_name,''),peer.login) ELSE c.title END,m.role,
 			CASE WHEN peer.avatar_key IS NOT NULL AND NOT peer.disabled THEN '/api/v1/users/'||peer.id::text||'/avatar' ELSE '' END,
-			(SELECT count(*) FROM messages msg WHERE msg.chat_id=c.id AND msg.seq>m.read_seq AND msg.sender_id<>$2),
+			(SELECT count(*) FROM messages msg WHERE msg.chat_id=c.id AND msg.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM message_hidden mh WHERE mh.message_id=msg.id AND mh.user_id=$2) AND msg.seq>m.read_seq AND msg.sender_id<>$2),
 			recent.preview,recent.created_at,recent.sender_login,recent.ciphertext,recent.sender_id,recent.client_id,COALESCE(peer.id::text,''),COALESCE(peer.disabled,false),peer.last_seen_at
 			FROM chats c JOIN chat_members m ON m.chat_id=c.id
 			LEFT JOIN users peer ON peer.id=CASE WHEN c.kind='direct' THEN CASE WHEN c.direct_user_low=$2 THEN c.direct_user_high ELSE c.direct_user_low END ELSE NULL END
 			LEFT JOIN LATERAL (SELECT COALESCE(NULLIF(CASE WHEN msg.encrypted THEN 'Вложение' ELSE LEFT(BTRIM(msg.body),160) END,''),
 				(SELECT a.filename FROM message_attachments ma JOIN attachments a ON a.id=ma.attachment_id WHERE ma.message_id=msg.id ORDER BY a.created_at LIMIT 1),
 				'Вложение') AS preview,msg.created_at::text AS created_at,COALESCE(NULLIF(sender.display_name,''),sender.login) AS sender_login,CASE WHEN msg.encrypted THEN msg.body ELSE NULL END AS ciphertext,msg.sender_id::text AS sender_id,msg.client_message_id::text AS client_id
-				FROM messages msg JOIN users sender ON sender.id=msg.sender_id WHERE msg.chat_id=c.id ORDER BY msg.seq DESC LIMIT 1) recent ON true
+				FROM messages msg JOIN users sender ON sender.id=msg.sender_id WHERE msg.chat_id=c.id AND msg.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM message_hidden mh WHERE mh.message_id=msg.id AND mh.user_id=$2) ORDER BY msg.seq DESC LIMIT 1) recent ON true
 			WHERE c.id=$1 AND m.user_id=$2 AND c.deleted_at IS NULL`, id, p.UserID).Scan(&v.ID, &v.Kind, &v.Title, &v.Role, &v.AvatarURL, &v.UnreadCount,
 			&v.LastMessagePreview, &v.LastMessageAt, &v.LastMessageSender, &v.LastMessageCiphertext, &v.LastMessageSenderID, &v.LastMessageClientID, &v.peerID, &v.peerDisabled, &lastSeen)
 		if err != nil {

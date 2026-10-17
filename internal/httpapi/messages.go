@@ -44,6 +44,7 @@ type deliveryView struct {
 
 func registerMessages(mux *http.ServeMux, d Dependencies) {
 	protected := func(pattern string, fn http.HandlerFunc) { mux.Handle(pattern, require(d.Auth, fn)) }
+	registerMessageActions(mux, d)
 	protected("POST /api/v1/chats/{id}/messages", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Encrypted       bool     `json:"encrypted"`
@@ -80,8 +81,13 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 		}
 		var v messageView
 		var existingText string
-		err = tx.QueryRow(r.Context(), `SELECT id::text,chat_id::text,seq,sender_id::text,client_message_id::text,body,encrypted,created_at::text FROM messages WHERE chat_id=$1 AND sender_id=$2 AND client_message_id=$3`, chatID, p.UserID, body.ClientMessageID).Scan(&v.ID, &v.ChatID, &v.Seq, &v.SenderID, &v.ClientMessageID, &existingText, &v.Encrypted, &v.CreatedAt)
+		var deleted bool
+		err = tx.QueryRow(r.Context(), `SELECT id::text,chat_id::text,seq,sender_id::text,client_message_id::text,body,encrypted,created_at::text,(deleted_at IS NOT NULL OR EXISTS(SELECT 1 FROM message_hidden mh WHERE mh.message_id=messages.id AND mh.user_id=$2)) FROM messages WHERE chat_id=$1 AND sender_id=$2 AND client_message_id=$3`, chatID, p.UserID, body.ClientMessageID).Scan(&v.ID, &v.ChatID, &v.Seq, &v.SenderID, &v.ClientMessageID, &existingText, &v.Encrypted, &v.CreatedAt, &deleted)
 		if err == nil {
+			if deleted {
+				writeError(w, 409, "message_deleted")
+				return
+			}
 			rows, queryErr := tx.Query(r.Context(), `SELECT attachment_id::text FROM message_attachments WHERE message_id=$1 ORDER BY attachment_id`, v.ID)
 			if queryErr != nil {
 				writeError(w, 500, "internal")
@@ -206,6 +212,21 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 		}
 		p, _ := auth.PrincipalFrom(r.Context())
 		after, before := r.URL.Query().Get("after"), r.URL.Query().Get("before")
+		var requestedIDs []string
+		idsMode := r.URL.Query().Has("ids")
+		if idsMode {
+			requestedIDs = strings.Split(r.URL.Query().Get("ids"), ",")
+			if len(requestedIDs) > 100 || r.URL.Query().Has("before") || r.URL.Query().Has("after") {
+				writeError(w, 400, "invalid_ids")
+				return
+			}
+			for _, messageID := range requestedIDs {
+				if !validUUID(messageID) {
+					writeError(w, 400, "invalid_ids")
+					return
+				}
+			}
+		}
 		if after != "" && before != "" {
 			writeError(w, 400, "invalid_cursor")
 			return
@@ -225,17 +246,23 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 		}
 		var rows pgx.Rows
 		var err error
-		if after != "" {
+		if idsMode {
+			rows, err = d.DB.Query(r.Context(), `SELECT m.id::text,m.chat_id::text,m.seq,m.sender_id::text,m.client_message_id::text,m.body,m.encrypted,m.created_at::text
+                FROM messages m JOIN chat_members cm ON cm.chat_id=m.chat_id JOIN chats c ON c.id=m.chat_id
+                WHERE m.chat_id=$1 AND cm.user_id=$2 AND c.deleted_at IS NULL AND m.deleted_at IS NULL
+                AND NOT EXISTS(SELECT 1 FROM message_hidden mh WHERE mh.message_id=m.id AND mh.user_id=$2)
+                AND m.id=ANY($3::uuid[]) ORDER BY m.seq DESC`, id, p.UserID, requestedIDs)
+		} else if after != "" {
 			rows, err = d.DB.Query(r.Context(), `SELECT m.id::text,m.chat_id::text,m.seq,m.sender_id::text,m.client_message_id::text,m.body,m.encrypted,m.created_at::text
 				FROM messages m JOIN chat_members cm ON cm.chat_id=m.chat_id JOIN chats c ON c.id=m.chat_id
-				WHERE m.chat_id=$1 AND cm.user_id=$2 AND c.deleted_at IS NULL AND m.seq>$3 ORDER BY m.seq ASC LIMIT $4`, id, p.UserID, cursor, parseLimit(r))
+				WHERE m.chat_id=$1 AND cm.user_id=$2 AND c.deleted_at IS NULL AND m.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM message_hidden mh WHERE mh.message_id=m.id AND mh.user_id=$2) AND m.seq>$3 ORDER BY m.seq ASC LIMIT $4`, id, p.UserID, cursor, parseLimit(r))
 		} else {
 			if before == "" {
 				cursor = 9223372036854775807
 			}
 			rows, err = d.DB.Query(r.Context(), `SELECT m.id::text,m.chat_id::text,m.seq,m.sender_id::text,m.client_message_id::text,m.body,m.encrypted,m.created_at::text
 				FROM messages m JOIN chat_members cm ON cm.chat_id=m.chat_id JOIN chats c ON c.id=m.chat_id
-				WHERE m.chat_id=$1 AND cm.user_id=$2 AND c.deleted_at IS NULL AND m.seq<$3 ORDER BY m.seq DESC LIMIT $4`, id, p.UserID, cursor, parseLimit(r))
+				WHERE m.chat_id=$1 AND cm.user_id=$2 AND c.deleted_at IS NULL AND m.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM message_hidden mh WHERE mh.message_id=m.id AND mh.user_id=$2) AND m.seq<$3 ORDER BY m.seq DESC LIMIT $4`, id, p.UserID, cursor, parseLimit(r))
 		}
 		if err != nil {
 			writeError(w, 500, "internal")
@@ -288,7 +315,7 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 		}
 		rows, err := d.DB.Query(r.Context(), `SELECT m.id::text,m.chat_id::text,m.seq,m.sender_id::text,m.client_message_id::text,m.body,m.encrypted,m.created_at::text
 			FROM messages m JOIN chats c ON c.id=m.chat_id JOIN chat_members cm ON cm.chat_id=c.id
-			WHERE m.chat_id=$1 AND cm.user_id=$2 AND c.deleted_at IS NULL AND
+			WHERE m.chat_id=$1 AND cm.user_id=$2 AND c.deleted_at IS NULL AND m.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM message_hidden mh WHERE mh.message_id=m.id AND mh.user_id=$2) AND
 			(to_tsvector('russian',m.body) @@ plainto_tsquery('russian',$3) OR m.body ILIKE '%'||$3||'%' OR
 			 EXISTS(SELECT 1 FROM message_attachments ma JOIN attachments a ON a.id=ma.attachment_id WHERE ma.message_id=m.id AND a.filename ILIKE '%'||$3||'%'))
 			ORDER BY m.seq DESC LIMIT $4`, id, p.UserID, q, parseLimit(r))

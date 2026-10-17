@@ -71,7 +71,7 @@ func New(deps Dependencies) http.Handler {
 		path := r.URL.Path
 		contentRead := r.Method == "GET" || r.Method == "HEAD"
 		contentRead = contentRead && (path == "/api/v1/chats" || strings.HasPrefix(path, "/api/v1/files/") ||
-			(strings.HasPrefix(path, "/api/v1/chats/") && (strings.HasSuffix(path, "/messages") || strings.Count(strings.TrimPrefix(path, "/api/v1/chats/"), "/") == 0)))
+			(strings.HasPrefix(path, "/api/v1/chats/") && (strings.HasSuffix(path, "/messages") || strings.Contains(path, "/messages/") || strings.Count(strings.TrimPrefix(path, "/api/v1/chats/"), "/") == 0)))
 		if deps.ContentKey != nil && contentRead && r.Header.Get("X-Content-Encryption") != "fc1" {
 			writeError(w, 426, "encryption_required")
 			return
