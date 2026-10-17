@@ -26,6 +26,19 @@ func uploadEncryptedPreview(w http.ResponseWriter, r *http.Request, d Dependenci
 		return
 	}
 	defer tx.Rollback(r.Context())
+	// Lock chat before quota and attachment rows, matching message/file/call writes.
+	var previewChat string
+	if err = tx.QueryRow(r.Context(), `SELECT chat_id::text FROM attachments WHERE id=$1 AND uploader_id=$2`, id, p.UserID).Scan(&previewChat); err != nil {
+		writeError(w, 404, "not_found")
+		return
+	}
+	if _, _, err = chatRole(r, tx, previewChat, p.UserID); err != nil {
+		writeError(w, 404, "not_found")
+		return
+	}
+	if !requireDirectCommunication(w, r, tx, previewChat) {
+		return
+	}
 	// Serialize quota accounting with file and avatar uploads.
 	if _, err = tx.Exec(r.Context(), `SELECT id FROM users WHERE id=$1 FOR UPDATE`, p.UserID); err != nil {
 		writeError(w, 500, "internal")

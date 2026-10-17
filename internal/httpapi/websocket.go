@@ -114,8 +114,25 @@ func registerWebsocket(mux *http.ServeMux, d Dependencies) {
 }
 
 func relaySignal(ctx context.Context, d Dependencies, p auth.Principal, kind, callID string, data json.RawMessage) bool {
+	tx, err := d.DB.Begin(ctx)
+	if err != nil {
+		return false
+	}
+	defer tx.Rollback(ctx)
+	var chatID string
+	if err = tx.QueryRow(ctx, `SELECT chat_id::text FROM calls WHERE id=$1`, callID).Scan(&chatID); err != nil {
+		return false
+	}
+	var locked string
+	if err = tx.QueryRow(ctx, `SELECT id::text FROM chats WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`, chatID).Scan(&locked); err != nil {
+		return false
+	}
+	allowed, err := directCommunicationAllowed(ctx, tx, chatID)
+	if err != nil || !allowed {
+		return false
+	}
 	var target string
-	err := d.DB.QueryRow(ctx, `SELECT CASE WHEN c.caller_session_id=$2 THEN c.accepted_session_id::text ELSE c.caller_session_id::text END
+	err = tx.QueryRow(ctx, `SELECT CASE WHEN c.caller_session_id=$2 THEN c.accepted_session_id::text ELSE c.caller_session_id::text END
 		FROM calls c JOIN chats ch ON ch.id=c.chat_id JOIN chat_members cm ON cm.chat_id=c.chat_id AND cm.user_id=$3
 		JOIN sessions s ON s.id=$2 AND s.user_id=$3 AND s.revoked_at IS NULL AND s.expires_at>now()
 		JOIN users u ON u.id=$3 AND NOT u.disabled
@@ -129,7 +146,7 @@ func relaySignal(ctx context.Context, d Dependencies, p auth.Principal, kind, ca
 	if err != nil {
 		return false
 	}
-	return d.Events.SendToSession(target, payload)
+	return d.Events != nil && d.Events.SendToSession(target, payload)
 }
 
 // Persist the last confirmed connection activity. Abrupt disconnects are

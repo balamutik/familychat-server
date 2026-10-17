@@ -52,6 +52,9 @@ func registerCalls(mux *http.ServeMux, d Dependencies) {
 			writeError(w, 404, "not_found")
 			return
 		}
+		if !requireDirectCommunication(w, r, tx, chatID) {
+			return
+		}
 		var calleeID string
 		err = tx.QueryRow(r.Context(), `SELECT cm.user_id::text FROM chat_members cm JOIN users u ON u.id=cm.user_id WHERE cm.chat_id=$1 AND cm.user_id<>$2 AND NOT u.disabled`, chatID, p.UserID).Scan(&calleeID)
 		if err != nil {
@@ -177,6 +180,18 @@ func changeCall(w http.ResponseWriter, r *http.Request, d Dependencies, action s
 		return
 	}
 	defer tx.Rollback(r.Context())
+	var chatID string
+	if err = tx.QueryRow(r.Context(), `SELECT chat_id::text FROM calls WHERE id=$1`, id).Scan(&chatID); err != nil {
+		writeError(w, 404, "not_found")
+		return
+	}
+	if _, _, err = chatRole(r, tx, chatID, p.UserID); err != nil {
+		writeError(w, 404, "not_found")
+		return
+	}
+	if action == "accept" && !requireDirectCommunication(w, r, tx, chatID) {
+		return
+	}
 	var c callView
 	var acceptedSession string
 	err = tx.QueryRow(r.Context(), `SELECT id::text,chat_id::text,caller_id::text,callee_id::text,kind,state,created_at,COALESCE(accepted_session_id::text,'') FROM calls WHERE id=$1 FOR UPDATE`, id).Scan(&c.ID, &c.ChatID, &c.CallerID, &c.CalleeID, &c.Kind, &c.State, &c.CreatedAt, &acceptedSession)
@@ -185,10 +200,6 @@ func changeCall(w http.ResponseWriter, r *http.Request, d Dependencies, action s
 		return
 	}
 	if p.UserID != c.CallerID && p.UserID != c.CalleeID {
-		writeError(w, 404, "not_found")
-		return
-	}
-	if _, _, err = chatRole(r, tx, c.ChatID, p.UserID); err != nil {
 		writeError(w, 404, "not_found")
 		return
 	}

@@ -38,7 +38,7 @@ func registerCallHistory(mux *http.ServeMux, d Dependencies) {
    CASE WHEN c.state IN ('missed','rejected','cancelled') THEN c.state
         WHEN c.connected_at IS NOT NULL THEN 'completed'
         WHEN c.media_tracking THEN 'failed' ELSE 'unknown' END,
-   c.created_at,c.connected_at,c.ended_at,NOT u.disabled
+   c.created_at,c.connected_at,c.ended_at,(NOT u.disabled AND NOT EXISTS(SELECT 1 FROM user_blocks b WHERE (b.source_user_id=$1 AND b.target_user_id=u.id) OR (b.source_user_id=u.id AND b.target_user_id=$1)))
    FROM calls c JOIN chats ch ON ch.id=c.chat_id
    JOIN chat_members cm ON cm.chat_id=c.chat_id AND cm.user_id=$1
    JOIN users u ON u.id=CASE WHEN c.caller_id=$1 THEN c.callee_id ELSE c.caller_id END

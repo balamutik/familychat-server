@@ -39,7 +39,7 @@ type chatView struct {
 }
 
 func (v *chatView) setPresence(d Dependencies, lastSeen *time.Time) {
-	if v.Kind != "direct" {
+	if v.Kind != "direct" || v.peerDisabled {
 		return
 	}
 	v.Presence = &peerPresence{LastSeenAt: lastSeen,
@@ -78,6 +78,10 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 			return
 		}
 		defer tx.Rollback(r.Context())
+		if err = lockContactPair(r.Context(), tx, p.UserID, body.UserID); err != nil {
+			writeError(w, 500, "internal")
+			return
+		}
 		var id string
 		created := true
 		err = tx.QueryRow(r.Context(), `INSERT INTO chats(kind,direct_user_low,direct_user_high) VALUES('direct',$1,$2)
@@ -96,6 +100,11 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 				return
 			}
 		}
+		communicationAllowed, e := directCommunicationAllowed(r.Context(), tx, id)
+		if e != nil {
+			writeError(w, 500, "internal")
+			return
+		}
 		if err = tx.Commit(r.Context()); err != nil {
 			writeError(w, 500, "internal")
 			return
@@ -104,7 +113,7 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		if created {
 			status = 201
 		}
-		v := chatView{ID: id, Kind: "direct", Title: peerName, Role: "member", peerID: body.UserID}
+		v := chatView{ID: id, Kind: "direct", Title: peerName, Role: "member", peerID: body.UserID, peerDisabled: !communicationAllowed}
 		v.setPresence(d, peerLastSeen)
 		if peerHasAvatar {
 			v.AvatarURL = avatarURL(body.UserID)
@@ -157,7 +166,7 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		rows, err := d.DB.Query(r.Context(), `SELECT c.id::text,c.kind,CASE WHEN c.kind='direct' THEN COALESCE(NULLIF(peer.display_name,''),peer.login) ELSE c.title END,m.role,
 			CASE WHEN peer.avatar_key IS NOT NULL AND NOT peer.disabled THEN '/api/v1/users/'||peer.id::text||'/avatar' ELSE '' END,
 			(SELECT count(*) FROM messages msg WHERE msg.chat_id=c.id AND msg.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM message_hidden mh WHERE mh.message_id=msg.id AND mh.user_id=$1) AND msg.seq>m.read_seq AND msg.sender_id<>$1),
-			recent.preview,recent.created_at,recent.sender_login,recent.ciphertext,recent.sender_id,recent.client_id,COALESCE(peer.id::text,''),COALESCE(peer.disabled,false),peer.last_seen_at
+			recent.preview,recent.created_at,recent.sender_login,recent.ciphertext,recent.sender_id,recent.client_id,COALESCE(peer.id::text,''),(COALESCE(peer.disabled,false) OR EXISTS(SELECT 1 FROM user_blocks b WHERE (b.source_user_id=$1 AND b.target_user_id=peer.id) OR (b.source_user_id=peer.id AND b.target_user_id=$1))),peer.last_seen_at
 			FROM chats c JOIN chat_members m ON m.chat_id=c.id
 			LEFT JOIN users peer ON peer.id=CASE WHEN c.kind='direct' THEN CASE WHEN c.direct_user_low=$1 THEN c.direct_user_high ELSE c.direct_user_low END ELSE NULL END
 			LEFT JOIN LATERAL (SELECT COALESCE(NULLIF(CASE WHEN msg.encrypted THEN 'Вложение' ELSE LEFT(BTRIM(msg.body),160) END,''),
@@ -200,7 +209,7 @@ func registerChats(mux *http.ServeMux, d Dependencies) {
 		err := d.DB.QueryRow(r.Context(), `SELECT c.id::text,c.kind,CASE WHEN c.kind='direct' THEN COALESCE(NULLIF(peer.display_name,''),peer.login) ELSE c.title END,m.role,
 			CASE WHEN peer.avatar_key IS NOT NULL AND NOT peer.disabled THEN '/api/v1/users/'||peer.id::text||'/avatar' ELSE '' END,
 			(SELECT count(*) FROM messages msg WHERE msg.chat_id=c.id AND msg.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM message_hidden mh WHERE mh.message_id=msg.id AND mh.user_id=$2) AND msg.seq>m.read_seq AND msg.sender_id<>$2),
-			recent.preview,recent.created_at,recent.sender_login,recent.ciphertext,recent.sender_id,recent.client_id,COALESCE(peer.id::text,''),COALESCE(peer.disabled,false),peer.last_seen_at
+			recent.preview,recent.created_at,recent.sender_login,recent.ciphertext,recent.sender_id,recent.client_id,COALESCE(peer.id::text,''),(COALESCE(peer.disabled,false) OR EXISTS(SELECT 1 FROM user_blocks b WHERE (b.source_user_id=$2 AND b.target_user_id=peer.id) OR (b.source_user_id=peer.id AND b.target_user_id=$2))),peer.last_seen_at
 			FROM chats c JOIN chat_members m ON m.chat_id=c.id
 			LEFT JOIN users peer ON peer.id=CASE WHEN c.kind='direct' THEN CASE WHEN c.direct_user_low=$2 THEN c.direct_user_high ELSE c.direct_user_low END ELSE NULL END
 			LEFT JOIN LATERAL (SELECT COALESCE(NULLIF(CASE WHEN msg.encrypted THEN 'Вложение' ELSE LEFT(BTRIM(msg.body),160) END,''),

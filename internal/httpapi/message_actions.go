@@ -63,6 +63,9 @@ func registerMessageActions(mux *http.ServeMux, d Dependencies) {
 			}
 			kind := "message_updated"
 			if r.Method == "PATCH" {
+				if !requireDirectCommunication(w, r, tx, chatID) {
+					return
+				}
 				var body struct {
 					Text      string `json:"text"`
 					Encrypted bool   `json:"encrypted"`

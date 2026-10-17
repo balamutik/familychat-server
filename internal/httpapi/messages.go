@@ -79,6 +79,9 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 			writeError(w, 404, "not_found")
 			return
 		}
+		if !requireDirectCommunication(w, r, tx, chatID) {
+			return
+		}
 		var v messageView
 		var existingText string
 		var deleted bool

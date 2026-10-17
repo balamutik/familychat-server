@@ -144,6 +144,9 @@ func registerFiles(mux *http.ServeMux, d Dependencies) {
 			writeError(w, 404, "not_found")
 			return
 		}
+		if !requireDirectCommunication(w, r, tx, chatID) {
+			return
+		}
 		if _, err = tx.Exec(r.Context(), `SELECT id FROM users WHERE id=$1 FOR UPDATE`, p.UserID); err != nil {
 			writeError(w, 500, "internal")
 			return
@@ -236,6 +239,9 @@ func registerFiles(mux *http.ServeMux, d Dependencies) {
 		}
 		if _, _, err = chatRole(r, finalTx, chatID, p.UserID); err != nil {
 			writeError(w, 404, "not_found")
+			return
+		}
+		if !requireDirectCommunication(w, r, finalTx, chatID) {
 			return
 		}
 		var id string
