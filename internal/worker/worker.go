@@ -312,6 +312,16 @@ func (w *Worker) makePreview(ctx context.Context, j job) (string, string) {
 }
 
 func (w *Worker) cleanup(ctx context.Context) error {
+	for i := 0; i < 25; i++ {
+		purged, err := w.purgeStory(ctx)
+		if err != nil {
+			return err
+		}
+		if !purged {
+			break
+		}
+	}
+
 	garbage, err := w.DB.Query(ctx, `SELECT object_key FROM encryption_gc WHERE not_before<=now() LIMIT 25`)
 	if err != nil {
 		return err

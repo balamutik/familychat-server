@@ -74,7 +74,8 @@ func uploadEncryptedPreview(w http.ResponseWriter, r *http.Request, d Dependenci
 	if err := tx.QueryRow(r.Context(), `SELECT
         COALESCE((SELECT sum(size_bytes+preview_size_bytes+CASE WHEN encrypted THEN 80+16*((size_bytes+1048575)/1048576) ELSE 0 END) FROM attachments WHERE uploader_id=$1 AND purged_at IS NULL),0)
         +COALESCE((SELECT avatar_size_bytes FROM users WHERE id=$1),0)
-        +COALESCE((SELECT sum(reserved_bytes) FROM upload_reservations WHERE user_id=$1 AND state='uploading' AND expires_at>now()),0)`, p.UserID).Scan(&used); err != nil {
+        +COALESCE((SELECT sum(reserved_bytes) FROM upload_reservations WHERE user_id=$1 AND state='uploading' AND expires_at>now()),0)
+ +COALESCE((SELECT sum(stored_size_bytes) FROM stories WHERE user_id=$1 AND purged_at IS NULL),0)`, p.UserID).Scan(&used); err != nil {
 		writeError(w, 500, "internal")
 		return
 	}

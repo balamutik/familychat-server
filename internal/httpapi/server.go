@@ -64,6 +64,7 @@ func New(deps Dependencies) http.Handler {
 	registerAvatars(mux, deps)
 	registerMessages(mux, deps)
 	registerFiles(mux, deps)
+	registerStories(mux, deps)
 	registerWebsocket(mux, deps)
 	registerCalls(mux, deps)
 	registerPushDevices(mux, deps)
@@ -71,7 +72,7 @@ func New(deps Dependencies) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		contentRead := r.Method == "GET" || r.Method == "HEAD"
-		contentRead = contentRead && (path == "/api/v1/chats" || strings.HasPrefix(path, "/api/v1/files/") ||
+		contentRead = contentRead && (path == "/api/v1/chats" || path == "/api/v1/stories" || strings.HasPrefix(path, "/api/v1/stories/") || strings.HasPrefix(path, "/api/v1/files/") ||
 			(strings.HasPrefix(path, "/api/v1/chats/") && (strings.HasSuffix(path, "/messages") || strings.Contains(path, "/messages/") || strings.Count(strings.TrimPrefix(path, "/api/v1/chats/"), "/") == 0)))
 		if deps.ContentKey != nil && contentRead && r.Header.Get("X-Content-Encryption") != "fc1" {
 			writeError(w, 426, "encryption_required")
