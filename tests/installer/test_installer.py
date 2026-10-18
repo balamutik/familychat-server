@@ -17,6 +17,28 @@ spec.loader.exec_module(installer)
 
 
 class InstallerTests(unittest.TestCase):
+    def test_cleanup_is_scoped_to_managed_familychat_images(self):
+        installer.configure(self.root, 'chat.example.com', 'admin@example.com', '8.8.8.8')
+        candidate = self.root / 'releases/v2.1.1'
+        candidate.mkdir(parents=True)
+        installer.link_state(self.root, candidate)
+        with patch.object(installer, 'run') as run:
+            installer.cleanup_managed_images(candidate)
+        run.assert_called_once_with(['docker', 'image', 'prune', '--all', '--force', '--filter',
+            'label=org.opencontainers.image.source=https://github.com/balamutik/familychat-server'])
+
+    def test_cleanup_skips_unmanaged_checkout_and_failure_is_nonfatal(self):
+        with patch.object(installer, 'run') as run:
+            installer.cleanup_managed_images(ROOT)
+        run.assert_not_called()
+        installer.configure(self.root, 'chat.example.com', 'admin@example.com', '8.8.8.8')
+        candidate = self.root / 'releases/v2.1.1'
+        candidate.mkdir(parents=True)
+        installer.link_state(self.root, candidate)
+        with patch.object(installer, 'run', side_effect=installer.InstallError('busy')), patch('sys.stderr', new_callable=io.StringIO) as stderr:
+            installer.cleanup_managed_images(candidate)
+        self.assertIn('Предупреждение', stderr.getvalue())
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

@@ -270,7 +270,7 @@ PYTHON
     # Import the original v2.0 key, or create the first pair for a new database.
     # Do this before mounting the two read-only Docker secrets into the API.
     compose run --rm --no-deps key-setup
-    compose up -d --no-build api worker turn nginx
+    compose up -d --no-build --wait --wait-timeout 86400 api worker turn nginx
 
     if [[ "$MODE" == letsencrypt ]]; then
         issued=true
@@ -301,6 +301,16 @@ PYTHON
     printf '%s\n' "$MODE" > .https/mode
     printf '%s\n' "$HOST" > .https/host
     printf 'Ready: https://%s%s/\n' "$PUBLIC_HOST" "$HTTPS_REDIRECT_PORT"
+    python3 - "$ROOT_DIR" <<'PYTHON'
+import importlib.util
+from pathlib import Path
+import sys
+release = Path(sys.argv[1])
+spec = importlib.util.spec_from_file_location('familychat_cleanup', release / 'scripts/familychat.py')
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.cleanup_managed_images(release)
+PYTHON
     [[ "$MODE" != self-signed ]] || printf 'Trust the local certificate on each client before connecting.\n'
 else
     [[ -z "$MODE$CERT_FILE$KEY_FILE$EMAIL" ]] || fail "renew uses the existing Let's Encrypt certificate; pass only --host and network options"

@@ -227,6 +227,22 @@ def activate(root, candidate, state):
     save_state(root, state)
 
 
+def cleanup_managed_images(candidate):
+    """Remove unused labelled release images, never containers or data volumes."""
+    candidate = candidate.resolve()
+    settings = candidate / '.env'
+    if not settings.is_symlink():
+        return
+    root = settings.resolve().parent
+    if candidate.parent != root / 'releases' or not (root / 'installation.json').is_file():
+        return
+    try:
+        run(['docker', 'image', 'prune', '--all', '--force', '--filter',
+             'label=org.opencontainers.image.source=https://github.com/' + REPOSITORY])
+    except (InstallError, OSError) as error:
+        print(f'Предупреждение: очистка старых образов не выполнена: {error}', file=sys.stderr)
+
+
 def prompt(message):
     # A byte-wise terminal erase can leave half of a UTF-8 character. Read one
     # raw line at a time so a decoding failure never consumes the next answer.
