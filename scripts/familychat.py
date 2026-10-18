@@ -272,7 +272,35 @@ def require_system():
     return distro, codename
 
 
+def install_dependencies(packages):
+    if prompt('Нужны пакеты: ' + ', '.join(packages) + '. Установить? [y/N]').lower() not in ('y', 'yes', 'д', 'да'):
+        raise InstallError('Установка зависимостей отменена.')
+    run(['apt-get', 'update'])
+    run(['apt-get', 'install', '-y', *packages])
+
+
+def compose_supported():
+    try:
+        version = run(['docker', 'compose', 'version', '--short'], capture_output=True, text=True).stdout.strip()
+    except InstallError:
+        return False
+    match = re.match(r'v?(\d+)\.(\d+)\.(\d+)', version)
+    return bool(match and tuple(map(int, match.groups())) >= (2, 24, 4))
+
+
+def installed_package(name):
+    try:
+        return run(['dpkg-query', '-W', '-f=${Status}', name], capture_output=True, text=True).stdout.strip() == 'install ok installed'
+    except InstallError:
+        return False
+
+
 def ensure_docker(distro, codename):
+    missing = [command for command in ('curl', 'openssl') if not shutil.which(command)]
+    if missing:
+        install_dependencies(missing)
+        if any(not shutil.which(command) for command in missing):
+            raise InstallError('Не удалось установить curl/OpenSSL. Проверьте PATH и пакеты apt.')
     if not shutil.which('docker'):
         if prompt('Docker не установлен. Установить из официального репозитория Docker? [y/N]').lower() not in ('y', 'yes', 'д', 'да'):
             raise InstallError('Установка отменена. Данные не изменены.')
@@ -287,14 +315,16 @@ def ensure_docker(distro, codename):
         run(['apt-get', 'install', '-y', 'docker-ce', 'docker-ce-cli', 'containerd.io', 'docker-buildx-plugin', 'docker-compose-plugin'])
         run(['systemctl', 'enable', '--now', 'docker'])
     run(['docker', 'info'], stdout=subprocess.DEVNULL)
-    version = run(['docker', 'compose', 'version', '--short'], capture_output=True, text=True).stdout.strip()
-    match = re.match(r'v?(\d+)\.(\d+)\.(\d+)', version)
-    if not match or tuple(map(int, match.groups())) < (2, 24, 4):
-        raise InstallError('Обновите Docker Compose до 2.24.4 или новее.')
-    for command in ('curl', 'openssl'):
-        if not shutil.which(command):
-            run(['apt-get', 'update'])
-            run(['apt-get', 'install', '-y', command])
+    if not compose_supported():
+        if installed_package('docker-ce-cli'):
+            package = 'docker-compose-plugin'
+        elif installed_package('docker.io'):
+            package = 'docker-compose-v2' if distro == 'ubuntu' else 'docker-compose'
+        else:
+            raise InstallError('Не удалось определить поставщика Docker. Установите Compose plugin 2.24.4 или новее из того же источника, что Docker.')
+        install_dependencies([package])
+        if not compose_supported():
+            raise InstallError('После установки требуется Docker Compose 2.24.4 или новее. Подключите актуальный репозиторий выбранного поставщика Docker.')
 
 
 def check_network(domain, public_ip, fresh):

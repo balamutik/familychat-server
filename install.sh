@@ -11,13 +11,22 @@ main() {
     source /etc/os-release
     [[ "$ID" == ubuntu || "$ID" == debian ]] || { echo 'Поддерживаются Ubuntu и Debian.' >&2; return 1; }
     [[ -d /run/systemd/system ]] || { echo 'Требуется VPS с systemd.' >&2; return 1; }
-    if ! command -v python3 >/dev/null || ! command -v curl >/dev/null || [[ ! -f /etc/ssl/certs/ca-certificates.crt ]]; then
-        printf 'Для установщика нужны Python 3, curl и CA-сертификаты. Установить? [y/N] ' >/dev/tty
+    local dependencies=() dependency
+    for dependency in python3 curl openssl; do
+        command -v "$dependency" >/dev/null || dependencies+=("$dependency")
+    done
+    [[ -s /etc/ssl/certs/ca-certificates.crt ]] || dependencies+=(ca-certificates)
+    if (( ${#dependencies[@]} )); then
+        printf 'Нужны зависимости: %s. Установить? [y/N] ' "${dependencies[*]}" >/dev/tty
         read -r answer </dev/tty
         case "$answer" in y|Y|yes|да|д) ;; *) echo 'Установка отменена.'; return 1 ;; esac
         apt-get update
-        apt-get install -y python3 curl ca-certificates
+        apt-get install -y "${dependencies[@]}"
     fi
+    for dependency in python3 curl openssl; do
+        command -v "$dependency" >/dev/null || { echo "Не найдена зависимость: $dependency" >&2; return 1; }
+    done
+    [[ -s /etc/ssl/certs/ca-certificates.crt ]] || { echo 'Не найдены CA-сертификаты.' >&2; return 1; }
     local temp cleanup
     temp="$(mktemp -d)"
     printf -v cleanup 'rm -rf -- %q' "$temp"
