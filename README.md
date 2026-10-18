@@ -4,7 +4,28 @@
 
 ## Установка на VPS одной командой
 
-На Ubuntu/Debian VPS с systemd выполните:
+На Ubuntu/Debian VPS с systemd сначала подготовьте базовые зависимости:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y curl ca-certificates python3 openssl
+```
+
+Если Docker уже установлен, проверьте `sudo docker info` и
+`sudo docker compose version` (нужен Compose 2.24.4 или новее).
+Для Docker из пакета `docker.io` на Ubuntu 24.04 установите недостающий плагин:
+
+```sh
+sudo apt-get install -y docker-compose-v2
+sudo docker compose version
+```
+
+Для Docker из официального репозитория Docker используйте пакет
+`docker-compose-plugin`. Подробности и различия пакетов — в
+[подготовке зависимостей](deploy/README.md#подготовка-зависимостей).
+Если Docker отсутствует полностью, мастер предложит установить его вместе с Compose.
+
+Затем запустите установщик:
 
 ```sh
 curl -fsSL https://github.com/balamutik/familychat-server/releases/latest/download/install.sh | sudo bash

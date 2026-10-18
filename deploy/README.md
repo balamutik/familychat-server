@@ -8,6 +8,90 @@ Firewall провайдера установщик не изменяет: раз
 UDP 3478, 55000–55039. При выпуске сертификата Let's Encrypt проверяет доступ
 снаружи; локальная проверка свободных портов не гарантирует доступ через firewall.
 
+## Подготовка зависимостей
+
+Команды выполняйте через SSH в интерактивном терминале, используя пользователя
+с правами `sudo` (либо root). Сначала установите базовые зависимости:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y curl ca-certificates python3 openssl
+```
+
+`curl` нужен ещё до запуска установочной команды. Python 3 запускает мастер,
+CA-сертификаты нужны для HTTPS-загрузок, OpenSSL — для работы с ключами.
+Git, Go, Node.js и локальная сборка образов для установки готового релиза не нужны.
+
+Если Docker не установлен, запускайте установщик ниже: он предложит установить
+Docker Engine и Compose из официального репозитория Docker и запустить службу.
+Если Docker уже есть, заранее проверьте **обе** команды:
+
+```sh
+sudo docker info
+sudo docker compose version
+```
+
+Наличие команды `docker` не означает наличие Compose. Установщик v2.1.0
+не устанавливает недостающий Compose автоматически при уже установленном Docker;
+в этом случае он может завершиться сообщением `docker (код 125)`.
+Старая отдельная команда `docker-compose` не заменяет требуемый плагин
+`docker compose` версии 2.24.4 или новее.
+
+### Ubuntu 24.04: Docker из репозитория Ubuntu
+
+Если используется пакет `docker.io`, установите Compose из того же репозитория:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y docker-compose-v2
+sudo systemctl enable --now docker
+sudo docker info
+sudo docker compose version
+```
+
+Для чистой Ubuntu 24.04 вместо автоматической установки Docker мастером можно
+заранее установить оба пакета: `sudo apt-get install -y docker.io docker-compose-v2`.
+Пакет [docker-compose-v2](https://packages.ubuntu.com/noble/docker-compose-v2)
+находится в компоненте `universe`. Если apt не находит его, проверьте, включён ли
+`universe` в источниках Ubuntu, и повторите `sudo apt-get update`.
+
+### Docker из официального репозитория Docker
+
+Если Docker установлен как `docker-ce`/`docker-ce-cli` и его apt-репозиторий
+уже подключён, пакет плагина называется иначе:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y docker-compose-plugin
+sudo docker compose version
+```
+
+Не устанавливайте одновременно оба варианта плагина и не смешивайте пакеты
+Docker Engine разных поставщиков. Определить установленные пакеты можно командой:
+
+```sh
+dpkg-query -W docker.io docker-ce docker-ce-cli docker-compose-v2 docker-compose-plugin 2>/dev/null
+```
+
+Для Debian или другой поддерживаемой Ubuntu следуйте инструкции
+[Docker Engine для Ubuntu](https://docs.docker.com/engine/install/ubuntu/)
+или [Docker Engine для Debian](https://docs.docker.com/engine/install/debian/),
+затем [установке Compose plugin](https://docs.docker.com/compose/install/linux/).
+Команды для пакета Ubuntu 24.04 выше не следует переносить на Debian без проверки.
+
+Если `sudo docker info` не выполняется, сначала проверьте службу:
+
+```sh
+sudo systemctl status docker --no-pager -l
+sudo journalctl -u docker -n 80 --no-pager
+```
+
+Продолжайте установку, когда Docker отвечает и версия Compose соответствует
+требованию. Добавлять пользователя в группу `docker` для установки через `sudo`
+не требуется.
+
+## Запуск установки
+
 Перед установкой проверьте свободное место:
 
 ```sh
