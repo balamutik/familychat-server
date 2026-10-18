@@ -41,7 +41,15 @@ type fileMeta struct {
 // stacks reject non-ASCII header values. The original header remains supported.
 func uploadFilename(headers http.Header) (string, error) {
 	name := headers.Get("X-File-Name")
-	if encoded := headers.Get("X-File-Name*"); encoded != "" {
+	encoded := headers.Get("X-File-Name*")
+	compatible := headers.Get("X-File-Name-Encoded")
+	if encoded != "" && compatible != "" && encoded != compatible {
+		return "", errors.New("conflicting filename encoding")
+	}
+	if encoded == "" {
+		encoded = compatible
+	}
+	if encoded != "" {
 		parts := strings.SplitN(encoded, "'", 3)
 		if len(encoded) > 1024 || len(parts) != 3 || !strings.EqualFold(parts[0], "UTF-8") {
 			return "", errors.New("invalid filename encoding")

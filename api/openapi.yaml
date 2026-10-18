@@ -61,11 +61,29 @@ components:
       format: uuid
     PushDeviceInput:
       type: object
+      additionalProperties: false
       required: [client_server_id]
       properties:
         client_server_id: {$ref: '#/components/schemas/UUID'}
+        platform: {type: string, enum: [ios, android], default: ios}
+        fcm_token: {type: string, minLength: 1, maxLength: 4096, description: Opaque case-sensitive FCM registration token without whitespace or control characters}
         alert_token: {type: string, pattern: '^[a-fA-F0-9]{64,256}$'}
         voip_token: {type: string, pattern: '^[a-fA-F0-9]{64,256}$'}
+      oneOf:
+        - required: [platform, fcm_token]
+          properties:
+            platform: {enum: [android]}
+          not:
+            anyOf:
+              - required: [alert_token]
+              - required: [voip_token]
+        - properties:
+            platform: {enum: [ios]}
+          not: {required: [fcm_token]}
+          anyOf:
+            - required: [alert_token]
+            - required: [voip_token]
+      description: Android uses platform android and fcm_token; omitted platform preserves APNs payload compatibility. Token or session rotation removes jobs belonging to the previous registration.
     Error:
       type: object
       required: [error]
@@ -554,7 +572,7 @@ paths:
       parameters: [{$ref: '#/components/parameters/ChatID'}]
       requestBody:
         required: true
-        description: Requires Content-Length of ciphertext, X-Plaintext-Size, X-Content-Encryption (fc1), X-File-Name and original MIME in Content-Type. A client-generated encrypted preview can be uploaded separately; its failure does not invalidate the original.
+        description: Requires Content-Length of ciphertext, X-Plaintext-Size, X-Content-Encryption (fc1), X-File-Name and original MIME in Content-Type. Unicode names may use X-File-Name* or its proxy-safe X-File-Name-Encoded alias (RFC5987); conflicting extended values are rejected. A client-generated encrypted preview can be uploaded separately; its failure does not invalidate the original.
         content:
           application/octet-stream:
             schema: {type: string, format: binary}

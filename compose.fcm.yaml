@@ -1,0 +1,24 @@
+# Use together with compose.yaml (and the selected HTTPS override).
+services:
+  api:
+    environment: &fcm_environment
+      FCM_CREDENTIALS_FILE: /run/secrets/fcm_credentials
+      FCM_PROJECT_ID: ${FCM_PROJECT_ID:?set FCM_PROJECT_ID}
+      FCM_APPLICATION_ID: ${FCM_APPLICATION_ID:-com.familychat.android}
+    secrets:
+      - source: fcm_credentials
+        target: fcm_credentials
+        uid: '10001'
+        gid: '10001'
+        mode: 0400
+  worker:
+    environment: *fcm_environment
+    secrets:
+      - source: fcm_credentials
+        target: fcm_credentials
+        uid: '10001'
+        gid: '10001'
+        mode: 0400
+secrets:
+  fcm_credentials:
+    file: ${FCM_CREDENTIALS_FILE:?set host path to Firebase service account JSON}

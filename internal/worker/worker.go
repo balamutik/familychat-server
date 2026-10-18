@@ -162,13 +162,13 @@ func (w *Worker) sendPush(ctx context.Context) (bool, error) {
 	}
 	defer tx.Rollback(ctx)
 	var id int64
-	var token, kind, sessionID string
+	var token, kind, sessionID, userID string
 	var payload json.RawMessage
 	var attempts int
-	err = tx.QueryRow(ctx, `SELECT j.id,CASE WHEN j.kind='voip' THEN d.voip_token ELSE d.alert_token END,
-		j.kind,j.payload,j.attempts,d.session_id::text FROM push_jobs j JOIN push_devices d ON d.id=j.device_id
+	err = tx.QueryRow(ctx, `SELECT j.id,CASE WHEN j.kind LIKE 'fcm_%' THEN d.fcm_token WHEN j.kind='voip' THEN d.voip_token ELSE d.alert_token END,
+		j.kind,j.payload,j.attempts,d.session_id::text,d.user_id::text FROM push_jobs j JOIN push_devices d ON d.id=j.device_id
 		WHERE j.available_at<=now() AND (j.claimed_until IS NULL OR j.claimed_until<now())
-		ORDER BY CASE WHEN j.kind='voip' THEN 0 ELSE 1 END,j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1`).Scan(&id, &token, &kind, &payload, &attempts, &sessionID)
+		ORDER BY CASE WHEN j.kind IN ('voip','fcm_call','fcm_call_state') THEN 0 ELSE 1 END,j.id FOR UPDATE OF j SKIP LOCKED LIMIT 1`).Scan(&id, &token, &kind, &payload, &attempts, &sessionID, &userID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return false, nil
 	}
@@ -185,7 +185,7 @@ func (w *Worker) sendPush(ctx context.Context) (bool, error) {
 	if err = w.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM sessions WHERE id=$1 AND revoked_at IS NULL AND expires_at>now())`, sessionID).Scan(&live); err != nil {
 		return false, err
 	}
-	if kind == "voip" {
+	if kind == "voip" || kind == "fcm_call" {
 		var data struct {
 			CallID string `json:"call_id"`
 		}
@@ -199,6 +199,20 @@ func (w *Worker) sendPush(ctx context.Context) (bool, error) {
 			live = live && ringing
 		}
 	}
+	if live && kind == "fcm_message" {
+		var data struct {
+			MessageID string `json:"message_id"`
+		}
+		if json.Unmarshal(payload, &data) != nil {
+			live = false
+		} else {
+			err = w.DB.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM messages m JOIN chats c ON c.id=m.chat_id JOIN chat_members cm ON cm.chat_id=c.id AND cm.user_id=$2 JOIN users u ON u.id=cm.user_id JOIN users sender ON sender.id=m.sender_id WHERE m.id=$1 AND m.deleted_at IS NULL AND c.deleted_at IS NULL AND NOT u.disabled AND NOT sender.disabled AND NOT EXISTS(SELECT 1 FROM message_hidden mh WHERE mh.message_id=m.id AND mh.user_id=$2) AND (c.kind<>'direct' OR NOT EXISTS(SELECT 1 FROM user_blocks b WHERE (b.source_user_id=m.sender_id AND b.target_user_id=$2) OR (b.source_user_id=$2 AND b.target_user_id=m.sender_id))))`, data.MessageID, userID).Scan(&live)
+			if err != nil {
+				return false, err
+			}
+		}
+	}
+
 	if !live || token == "" {
 		_, err = w.DB.Exec(ctx, `DELETE FROM push_jobs WHERE id=$1`, id)
 		return true, err
@@ -215,6 +229,14 @@ func (w *Worker) sendPush(ctx context.Context) (bool, error) {
 			return false, beginErr
 		}
 		defer cleanup.Rollback(ctx)
+		if strings.HasPrefix(kind, "fcm_") {
+			_, err = cleanup.Exec(ctx, `DELETE FROM push_devices WHERE id=(SELECT device_id FROM push_jobs WHERE id=$1) AND fcm_token=$2`, id, token)
+			if err != nil {
+				return false, err
+			}
+			return true, cleanup.Commit(ctx)
+		}
+
 		if kind == "voip" {
 			_, err = cleanup.Exec(ctx, `DELETE FROM push_devices WHERE id=(SELECT device_id FROM push_jobs WHERE id=$1) AND alert_token IS NULL`, id)
 			if err != nil {

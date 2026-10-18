@@ -80,9 +80,25 @@ components:
       required: [client_server_id]
       properties:
         client_server_id: {$ref: '#/components/schemas/UUID'}
+        platform: {type: string, enum: [ios, android], default: ios}
+        fcm_token: {type: string, minLength: 1, maxLength: 4096, description: Opaque case-sensitive FCM registration token without whitespace or control characters}
         alert_token: {type: string, pattern: '^[a-fA-F0-9]{64,256}$'}
         voip_token: {type: string, pattern: '^[a-fA-F0-9]{64,256}$'}
-      description: Нужен хотя бы один токен; повторный PUT заменяет оба токена текущей сессии.
+      oneOf:
+        - required: [platform, fcm_token]
+          properties:
+            platform: {enum: [android]}
+          not:
+            anyOf:
+              - required: [alert_token]
+              - required: [voip_token]
+        - properties:
+            platform: {enum: [ios]}
+          not: {required: [fcm_token]}
+          anyOf:
+            - required: [alert_token]
+            - required: [voip_token]
+      description: Android uses platform android and fcm_token; omitted platform preserves APNs payload compatibility. Token or session rotation removes jobs belonging to the previous registration.
     Error:
       type: object
       required: [error]
@@ -1164,6 +1180,11 @@ paths:
           required: true
           schema: {type: integer, format: int64, minimum: 1}
         - {$ref: '#/components/parameters/ChatID'}
+        - name: X-File-Name-Encoded
+          in: header
+          required: false
+          description: Proxy-safe alias of X-File-Name*. RFC 5987 UTF-8 value; both extended fields must match when present.
+          schema: { type: string, maxLength: 1024 }
         - name: X-File-Name*
           in: header
           required: false

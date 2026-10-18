@@ -105,6 +105,12 @@ func registerCalls(mux *http.ServeMux, d Dependencies) {
 			WHERE d.user_id=$5 AND d.voip_token IS NOT NULL AND s.revoked_at IS NULL AND s.expires_at>now()`,
 				call.ID, chatID, body.Kind, p.UserID, calleeID)
 		}
+		if err == nil && d.PushEnabled {
+			_, err = tx.Exec(r.Context(), `INSERT INTO push_jobs(device_id,kind,payload)
+            SELECT d.id,'fcm_call',jsonb_build_object('server_id',d.client_server_id::text,'client_server_id',d.client_server_id::text,'call_id',$1::text,'chat_id',$2::text,'caller_name',COALESCE(NULLIF(u.display_name,''),u.login),'kind',$3::text,'expires_at',extract(epoch from $6::timestamptz+interval '45 seconds')::bigint)
+            FROM push_devices d JOIN sessions s ON s.id=d.session_id JOIN users u ON u.id=$4
+            WHERE d.user_id=$5 AND d.platform='android' AND d.fcm_token IS NOT NULL AND s.revoked_at IS NULL AND s.expires_at>now()`, call.ID, chatID, call.Kind, p.UserID, calleeID, call.CreatedAt)
+		}
 		if err != nil {
 			writeError(w, 500, "internal")
 			return
@@ -246,6 +252,17 @@ func changeCall(w http.ResponseWriter, r *http.Request, d Dependencies, action s
 		writeError(w, 500, "internal")
 		return
 	}
+	if d.PushEnabled {
+		_, err = tx.Exec(r.Context(), `INSERT INTO push_jobs(device_id,kind,payload)
+        SELECT d.id,'fcm_call_state',jsonb_build_object('server_id',d.client_server_id::text,'client_server_id',d.client_server_id::text,'call_id',$1::text,'chat_id',$2::text,'state',$3::text)
+        FROM push_devices d JOIN sessions s ON s.id=d.session_id
+        WHERE d.user_id IN ($4,$5) AND d.platform='android' AND d.fcm_token IS NOT NULL AND s.revoked_at IS NULL AND s.expires_at>now()`, c.ID, c.ChatID, newState, c.CallerID, c.CalleeID)
+		if err != nil {
+			writeError(w, 500, "internal")
+			return
+		}
+	}
+
 	if err = tx.Commit(r.Context()); err != nil {
 		writeError(w, 500, "internal")
 		return
