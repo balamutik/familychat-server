@@ -10,6 +10,7 @@ import (
 	"familychat/server/internal/auth"
 	"familychat/server/internal/contentcrypto"
 	"familychat/server/internal/events"
+	"familychat/server/internal/keyservice"
 	"familychat/server/internal/objects"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -24,6 +25,7 @@ type FileStore interface {
 }
 
 type Dependencies struct {
+	KeyService     *keyservice.Config
 	ContentKey     *contentcrypto.Key
 	DB             *pgxpool.Pool
 	Objects        FileStore

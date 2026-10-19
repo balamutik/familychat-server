@@ -1,0 +1,16 @@
+# Optional independent key service. The API receives public metadata and a
+# ticket-signing secret; content private keys are not mounted into the API.
+services:
+  api:
+    environment:
+      CONTENT_KEY_SERVICE_FILE: /run/secrets/key_service
+    secrets: !override
+      - admin_password
+      - source: key_service
+        target: key_service
+        uid: '10001'
+        gid: '10001'
+        mode: 0400
+secrets:
+  key_service:
+    file: ${KEY_SERVICE_CONFIG_FILE:-./secrets/key-service.json}

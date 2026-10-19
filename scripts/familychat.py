@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """FamilyChat release installer and local maintenance CLI (stdlib only)."""
 import argparse
+import base64
 import fcntl
 import hashlib
 import io
@@ -19,6 +20,7 @@ import tarfile
 import tempfile
 import urllib.error
 import urllib.request
+import urllib.parse
 
 REPOSITORY = 'balamutik/familychat-server'
 DEFAULT_ROOT = Path('/opt/familychat')
@@ -172,6 +174,8 @@ def fetch_bundle(repository, version, destination):
         for name in ('compose.yaml', 'compose.https.yaml', 'scripts/familychat.py', 'scripts/deploy-https.sh', 'deploy/nginx/default.conf.template'):
             if not (stage / name).is_file():
                 raise InstallError(f'В релизе отсутствует {name}.')
+        if manifest.get('external_key_service', 0) >= 1 and not (stage / 'compose.keyserver.yaml').is_file():
+            raise InstallError('В релизе отсутствует compose.keyserver.yaml.')
         stage.rename(destination)
 
 
@@ -183,10 +187,59 @@ def environment(root, state):
     return env
 
 
+def external_keys_enabled(root):
+    return any(line.startswith('KEY_SERVICE_CONFIG_FILE=') and line.partition('=')[2].strip()
+               for line in (root / '.env').read_text().splitlines())
+
+
+def configure_key_service(root, source):
+    try:
+        if not source.is_file() or source.stat().st_size > 16384:
+            raise ValueError()
+        config = json.loads(source.read_text())
+        expected = {'scheme', 'key_id', 'public_key', 'key_server_url', 'ticket_issuer', 'ticket_secret'}
+        if not isinstance(config, dict) or set(config) != expected or not all(isinstance(value, str) for value in config.values()):
+            raise ValueError()
+        public = base64.b64decode(config['public_key'], validate=True)
+        secret = base64.b64decode(config['ticket_secret'], validate=True)
+        endpoint = urllib.parse.urlsplit(config['key_server_url'])
+        if (config['scheme'] != 'fc1' or len(public) != 32 or len(secret) != 32
+                or hashlib.sha256(public).hexdigest() != config['key_id']
+                or not config['ticket_issuer'].strip() or len(config['ticket_issuer']) > 200
+                or endpoint.scheme != 'https' or not endpoint.hostname
+                or endpoint.username is not None or endpoint.password is not None
+                or endpoint.query or endpoint.fragment or endpoint.path != '/api/v1/keys/current'
+                or endpoint.port is None or not 1 <= endpoint.port <= 65535
+                or endpoint.port in (80, 443, 8080)):
+            raise ValueError()
+    except (OSError, ValueError, TypeError):
+        raise InstallError('Некорректный файл подключения сервера ключей. Используйте main-server.json, экспортированный сервером ключей; нужен HTTPS и отдельный порт (обычно 8443).')
+    existing = root / 'secrets/content-public-key.txt'
+    previous = root / 'secrets/key-service.json'
+    try:
+        old_public = existing.read_text().strip() if existing.is_file() else None
+        if previous.is_file():
+            old_public = json.loads(previous.read_text())['public_key']
+        if old_public is not None and base64.b64decode(old_public, validate=True) != public:
+            raise InstallError('Новый ключ не совпадает с текущим. Сначала импортируйте исходную пару ключей в отдельный сервер ключей, чтобы сохранить историю.')
+    except (OSError, ValueError, KeyError):
+        raise InstallError('Не удалось проверить существующий ключ. Восстановите настройки из резервной копии.')
+    atomic_write(previous, json.dumps(config, indent=2) + '\n', 0o400)
+    if os.geteuid() == 0:
+        os.chown(previous, 10001, 10001)
+    env_file = root / '.env'
+    lines = [line for line in env_file.read_text().splitlines() if not line.startswith('KEY_SERVICE_CONFIG_FILE=')]
+    atomic_write(env_file, '\n'.join(lines) + '\nKEY_SERVICE_CONFIG_FILE=./secrets/key-service.json\n')
+
+
 def compose(root, release, state, *args, **kwargs):
+    files = ['-f', release / 'compose.yaml', '-f', release / 'compose.https.yaml']
+    if external_keys_enabled(root):
+        if not (release / 'compose.keyserver.yaml').is_file():
+            raise InstallError('Этот релиз не поддерживает отдельный сервер ключей. Обновите основной сервер.')
+        files += ['-f', release / 'compose.keyserver.yaml']
     return run(['docker', 'compose', '--project-name', state['project'], '--env-file', root / '.env',
-                '-f', release / 'compose.yaml', '-f', release / 'compose.https.yaml', *args],
-               cwd=release, env=environment(root, state), **kwargs)
+                *files, *args], cwd=release, env=environment(root, state), **kwargs)
 
 
 def link_state(root, release):
@@ -203,6 +256,8 @@ def activate(root, candidate, state):
     candidate_manifest = candidate / 'release.json'
     current_crypto = json.loads(current_manifest.read_text()).get('content_encryption', 0) if current_manifest.exists() else 0
     candidate_crypto = json.loads(candidate_manifest.read_text()).get('content_encryption', 0) if candidate_manifest.exists() else 0
+    if external_keys_enabled(root) and (not candidate_manifest.exists() or json.loads(candidate_manifest.read_text()).get('external_key_service', 0) < 1):
+        raise InstallError('Этот релиз не поддерживает отдельный сервер ключей; откат отменён.')
     minimum_crypto = max(current_crypto, state.get('content_encryption', 0))
     if minimum_crypto > candidate_crypto:
         raise InstallError('Нельзя откатить зашифрованную установку на сервер без поддержки шифрования.')
@@ -374,7 +429,10 @@ def prepare_managed_upgrade(candidate):
     state = load_state(root)
     current_manifest = root / 'current/release.json'
     current_crypto = json.loads(current_manifest.read_text()).get('content_encryption', 0) if current_manifest.exists() else 0
-    candidate_crypto = json.loads((candidate / 'release.json').read_text()).get('content_encryption', 0)
+    candidate_manifest = candidate / 'release.json'
+    candidate_crypto = json.loads(candidate_manifest.read_text()).get('content_encryption', 0)
+    if external_keys_enabled(root) and (not candidate_manifest.exists() or json.loads(candidate_manifest.read_text()).get('external_key_service', 0) < 1):
+        raise InstallError('Этот релиз не поддерживает отдельный сервер ключей; откат отменён.')
     minimum_crypto = max(current_crypto, state.get('content_encryption', 0))
     if minimum_crypto > candidate_crypto:
         raise InstallError('Нельзя откатить зашифрованную установку на сервер без поддержки шифрования.')
@@ -462,9 +520,12 @@ def configure_push(root, release, state):
 def main(argv=None):
     parser = argparse.ArgumentParser(description='Установка и обслуживание FamilyChat')
     parser.add_argument('--root', type=Path, default=DEFAULT_ROOT, help=argparse.SUPPRESS)
-    parser.add_argument('command', choices=('install', 'update', 'status', 'logs', 'renew', 'configure-push'))
+    parser.add_argument('command', choices=('install', 'update', 'status', 'logs', 'renew', 'configure-push', 'configure-key-server'))
     parser.add_argument('--version', help='Конкретный релиз vX.Y.Z (по умолчанию последний)')
+    parser.add_argument('--key-service-config', type=Path, help='main-server.json, экспортированный отдельным сервером ключей')
     args = parser.parse_args(argv)
+    if args.key_service_config is not None and args.command not in ('install', 'update', 'configure-key-server'):
+        parser.error('--key-service-config используется только с install, update или configure-key-server')
     distro, codename = require_system()
     root = args.root.resolve()
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -515,6 +576,10 @@ def main(argv=None):
                 release = root / 'releases' / version
                 if not release.exists():
                     fetch_bundle(state['repository'], version, release)
+            if args.key_service_config is not None:
+                if json.loads((release / 'release.json').read_text()).get('external_key_service', 0) < 1:
+                    raise InstallError('Выбранный релиз не поддерживает отдельный сервер ключей.')
+                configure_key_service(root, args.key_service_config.resolve())
             activate(root, release, state)
             created = bootstrap_admin(root, release, state)
             install_commands(root)
@@ -527,6 +592,18 @@ def main(argv=None):
             release = (root / 'current').resolve()
             if not (release / 'release.json').is_file():
                 raise InstallError('Установка ещё не завершена. Повторите установочную команду.')
+            if args.command == 'configure-key-server':
+                if json.loads((release / 'release.json').read_text()).get('external_key_service', 0) < 1:
+                    raise InstallError('Сначала обновите основной сервер до релиза с поддержкой сервера ключей.')
+                source = args.key_service_config or Path(prompt('Путь к main-server.json с сервера ключей:')).expanduser()
+                configure_key_service(root, source.resolve())
+                compose(root, release, state, 'config', '-q')
+                compose(root, release, state, 'up', '-d', '--no-deps', '--force-recreate', '--wait', 'api')
+                compose(root, release, state, 'exec', '-T', 'nginx', 'nginx', '-s', 'reload')
+                print('Подключён отдельный сервер ключей. API не получает приватный ключ переписки. Обновите клиентские приложения.')
+                if (root / 'secrets/content-private-key.txt').exists():
+                    print('Прежние файлы ключей сохранены как резервная копия. После проверки переноса уберите их с этого хоста по инструкции.')
+                return
             if args.command == 'status':
                 if state.get('pending_version'):
                     print('Не завершена активация релиза: ' + state['pending_version'])

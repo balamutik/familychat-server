@@ -167,4 +167,30 @@ func TestLegacyMigrationResumesAndPreservesKey(t *testing.T) {
 	if _, err = Initialize(ctx, db, store, path); err == nil {
 		t.Fatal("lost key silently replaced")
 	}
+	external := &Key{ID: key.ID, Public: append([]byte(nil), key.Public...)}
+	if _, err = db.Exec(ctx, `UPDATE messages SET body='Новая миграция без приватного ключа', encrypted=false`); err != nil {
+		t.Fatal(err)
+	}
+	publicOnly, err := InitializePublic(ctx, db, store, external)
+	if err != nil || len(publicOnly.Private) != 0 {
+		t.Fatal("external mode requires private key on API", err)
+	}
+	if err = db.QueryRow(ctx, `SELECT body FROM messages`).Scan(&body); err != nil {
+		t.Fatal(err)
+	}
+	sealed, err = base64.StdEncoding.DecodeString(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opened.Reset()
+	if err = key.Decrypt(&opened, bytes.NewReader(sealed), MessageContext("chat", "sender", "client")); err != nil || opened.String() != "Новая миграция без приватного ключа" {
+		t.Fatal("public-only migration corrupted history", err)
+	}
+	wrong, _ := Generate()
+	if _, err = InitializePublic(ctx, db, store, &Key{ID: wrong.ID, Public: wrong.Public}); err == nil {
+		t.Fatal("external migration silently replaced database key")
+	}
+	if _, err = InitializePublic(ctx, db, store, key); err == nil {
+		t.Fatal("external mode accepted private material")
+	}
 }

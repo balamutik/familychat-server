@@ -26,7 +26,17 @@ EOF
 
 fail() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || fail "$1 is required"; }
-compose() { docker compose -f compose.yaml -f compose.https.yaml "$@"; }
+external_keys() {
+    [[ -n "${KEY_SERVICE_CONFIG_FILE:-}" ]] || { [[ -f .env ]] && grep -Eq '^KEY_SERVICE_CONFIG_FILE=.+$' .env; }
+}
+compose() {
+    local files=(-f compose.yaml -f compose.https.yaml)
+    if external_keys; then
+        [[ -f compose.keyserver.yaml ]] || fail "release does not support the external key server"
+        files+=(-f compose.keyserver.yaml)
+    fi
+    docker compose "${files[@]}" "$@"
+}
 certbot_run() {
     compose --profile certbot run --rm --no-deps --user "$(id -u):$(id -g)" certbot \
         --work-dir /etc/letsencrypt/work --logs-dir /etc/letsencrypt/logs "$@"
@@ -269,7 +279,7 @@ PYTHON
     compose up -d --wait postgres
     # Import the original v2.0 key, or create the first pair for a new database.
     # Do this before mounting the two read-only Docker secrets into the API.
-    compose run --rm --no-deps key-setup
+    if ! external_keys; then compose run --rm --no-deps key-setup; fi
     compose up -d --no-build --wait --wait-timeout 86400 api worker turn nginx
 
     if [[ "$MODE" == letsencrypt ]]; then

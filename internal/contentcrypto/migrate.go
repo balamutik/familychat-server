@@ -28,6 +28,20 @@ func InitializeSecrets(ctx context.Context, db *pgxpool.Pool, store Store, publi
 	return initialize(ctx, db, store, func(expected string) (*Key, error) { return LoadSecrets(publicPath, privatePath, expected) })
 }
 
+// InitializePublic encrypts legacy plaintext and validates storage using only
+// public material. Existing fingerprints must match; private keys stay off-host.
+func InitializePublic(ctx context.Context, db *pgxpool.Pool, store Store, key *Key) (*Key, error) {
+	if key == nil || len(key.Public) != 32 || len(key.Private) != 0 {
+		return nil, errors.New("external key mode requires public material only")
+	}
+	return initialize(ctx, db, store, func(expected string) (*Key, error) {
+		if expected != "" && expected != key.ID {
+			return nil, errors.New("external public key does not match this database; import the original key into the key server")
+		}
+		return key, nil
+	})
+}
+
 func initialize(ctx context.Context, db *pgxpool.Pool, store Store, load func(string) (*Key, error)) (*Key, error) {
 	conn, err := db.Acquire(ctx)
 	if err != nil {

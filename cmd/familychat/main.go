@@ -18,6 +18,7 @@ import (
 	"familychat/server/internal/database"
 	"familychat/server/internal/events"
 	"familychat/server/internal/httpapi"
+	"familychat/server/internal/keyservice"
 	"familychat/server/internal/objects"
 	"familychat/server/internal/push"
 	"familychat/server/internal/worker"
@@ -107,7 +108,13 @@ func run(ctx context.Context, args []string) error {
 	}
 	log.Print("Checking content encryption and migrating legacy data")
 	var contentKey *contentcrypto.Key
-	if keyPath := os.Getenv("CONTENT_KEY_FILE"); keyPath != "" {
+	var keyService *keyservice.Config
+	if integrationPath := os.Getenv("CONTENT_KEY_SERVICE_FILE"); integrationPath != "" {
+		keyService, err = keyservice.Load(integrationPath)
+		if err == nil {
+			contentKey, err = contentcrypto.InitializePublic(ctx, pool, store, keyService.PublicKey())
+		}
+	} else if keyPath := os.Getenv("CONTENT_KEY_FILE"); keyPath != "" {
 		// Explicit compatibility option for non-Docker deployments.
 		contentKey, err = contentcrypto.Initialize(ctx, pool, store, keyPath)
 	} else {
@@ -144,7 +151,7 @@ func run(ctx context.Context, args []string) error {
 			}
 		}
 	}()
-	h := httpapi.New(httpapi.Dependencies{ContentKey: contentKey, DB: pool, Objects: store, Auth: service, Events: hub, AllowedOrigins: c.AllowedOrigins, TurnURL: c.TurnURL, TurnSecret: c.TurnSecret, PushEnabled: c.APNsKeyFile != "" || c.FCMCredentialsFile != "", MaxFileBytes: c.MaxFileBytes, UserQuotaBytes: c.UserQuotaBytes, AdminStaticDir: os.Getenv("ADMIN_STATIC_DIR")})
+	h := httpapi.New(httpapi.Dependencies{KeyService: keyService, ContentKey: contentKey, DB: pool, Objects: store, Auth: service, Events: hub, AllowedOrigins: c.AllowedOrigins, TurnURL: c.TurnURL, TurnSecret: c.TurnSecret, PushEnabled: c.APNsKeyFile != "" || c.FCMCredentialsFile != "", MaxFileBytes: c.MaxFileBytes, UserQuotaBytes: c.UserQuotaBytes, AdminStaticDir: os.Getenv("ADMIN_STATIC_DIR")})
 	srv := &http.Server{Addr: c.ListenAddr, Handler: h, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	signalCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()

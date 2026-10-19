@@ -3,9 +3,21 @@
 set -euo pipefail
 main() {
     if [[ "${1:-}" == --help ]]; then
-        printf 'FamilyChat installer for Ubuntu/Debian VPS. Usage: sudo bash install.sh [vX.Y.Z]\n'
+        printf 'FamilyChat installer for Ubuntu/Debian VPS. Usage: sudo bash install.sh [vX.Y.Z] [--key-service-config /root/main-server.json]\n'
         return
     fi
+    local selected_version="" controller_args=()
+    while (( $# )); do
+        case "$1" in
+            --key-service-config)
+                [[ $# -ge 2 ]] || { echo '--key-service-config requires a path' >&2; return 1; }
+                controller_args+=(--key-service-config "$2"); shift 2 ;;
+            v[0-9]*)
+                [[ -z "$selected_version" ]] || { echo 'Specify only one version' >&2; return 1; }
+                selected_version="$1"; shift ;;
+            *) echo "Unknown option: $1" >&2; return 1 ;;
+        esac
+    done
     [[ "$(uname -s)" == Linux && "$EUID" == 0 ]] || { echo 'Запустите установку на Ubuntu/Debian VPS через sudo.' >&2; return 1; }
     # shellcheck source=/dev/null
     source /etc/os-release
@@ -33,7 +45,7 @@ main() {
     # Capture the quoted path now: the local variable is gone when EXIT runs.
     # shellcheck disable=SC2064
     trap "$cleanup" EXIT
-    python3 - "$temp" "${1:-}" <<'PY'
+    python3 - "$temp" "$selected_version" <<'PY'
 import hashlib, io, json, pathlib, re, sys, tarfile, urllib.request
 root = pathlib.Path(sys.argv[1])
 repo = 'balamutik/familychat-server'
@@ -74,6 +86,6 @@ try:
 except Exception as error:
     sys.exit(f'Не удалось получить релиз FamilyChat: {error}. Проверьте доступность публичного релиза.')
 PY
-    python3 "$temp/scripts/familychat.py" install --version "$(cat "$temp/version")"
+    python3 "$temp/scripts/familychat.py" install --version "$(cat "$temp/version")" "${controller_args[@]}"
 }
 main "$@"

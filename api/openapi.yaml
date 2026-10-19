@@ -6,7 +6,9 @@ info:
     Content encryption protocol fc1: clients send X-Content-Encryption: fc1 when
     reading chats/messages/files. Missing negotiation or plaintext writes return
     HTTP 426 encryption_required. Obtain the common server key using the authenticated
-    GET /encryption/key over HTTPS. This is shared-key encryption, not E2EE.
+    GET /encryption/key over HTTPS. In external-key mode it returns a short-lived
+    ticket and a key_server_url; clients fetch keys directly and cache them in protected
+    device storage. This is shared-key encryption, not E2EE.
     Text is base64 of an FCENC001 envelope; file and preview bodies are binary envelopes.
     HPKE suite is X25519/HKDF-SHA256/AES-256-GCM (RFC 9180 base mode).
     See README.md for framing, contexts, migration and backup requirements.
@@ -156,21 +158,30 @@ security:
 paths:
   /encryption/key:
     get:
-      summary: Obtain the common server encryption key after authentication
-      description: HTTPS only in clients except loopback development. Returns Cache-Control no-store. Never log or persist this response outside protected key storage.
+      summary: Obtain the current key or a direct key-service ticket after authentication
+      description: HTTPS only in clients except loopback development. Returns Cache-Control no-store. External mode never returns private content material. Clients contact key_server_url directly with Authorization Bearer ticket, without forwarding their FamilyChat session token, and cache validated keys in protected device storage.
       responses:
         '200':
-          description: Shared server key; all authorized accounts receive the same pair.
+          description: Legacy shared key, or a direct key-service descriptor (ticket expires in 120 seconds).
           content:
             application/json:
               schema:
-                type: object
-                required: [scheme, key_id, public_key, private_key]
-                properties:
-                  scheme: {type: string, const: fc1}
-                  key_id: {type: string, pattern: '^[0-9a-f]{64}$', description: SHA-256 of the raw public key.}
-                  public_key: {type: string, format: byte, description: Base64 raw X25519 public key (32 bytes).}
-                  private_key: {type: string, format: byte, description: Base64 raw X25519 private key (32 bytes).}
+                oneOf:
+                  - type: object
+                    required: [scheme, key_id, public_key, private_key]
+                    properties:
+                      scheme: {type: string, const: fc1}
+                      key_id: {type: string, pattern: '^[0-9a-f]{64}$'}
+                      public_key: {type: string, format: byte, description: Base64 raw X25519 public key (32 bytes).}
+                      private_key: {type: string, format: byte, description: Base64 raw X25519 private key (32 bytes).}
+                  - type: object
+                    required: [scheme, key_id, key_server_url, ticket, ticket_expires_at]
+                    properties:
+                      scheme: {type: string, const: fc1}
+                      key_id: {type: string, pattern: '^[0-9a-f]{64}$'}
+                      key_server_url: {type: string, format: uri, example: 'https://keys.example.com:8443/api/v1/keys/current'}
+                      ticket: {type: string, description: Short-lived HS256 JWT for the independent key service.}
+                      ticket_expires_at: {type: string, format: date-time}
         '401': {description: A valid active session is required.}
         '503': {description: Encryption is unavailable.}
   /api/v1/admin/invites:
