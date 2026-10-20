@@ -22,7 +22,8 @@ import urllib.error
 import urllib.request
 import urllib.parse
 
-REPOSITORY = 'balamutik/familychat-server'
+DEFAULT_REPOSITORY = 'balamutik/familychat-server'
+REPOSITORY = DEFAULT_REPOSITORY
 DEFAULT_ROOT = Path('/opt/familychat')
 COMMAND_PATH = Path('/usr/local/bin/familychat')
 VERSION = re.compile(r'v[0-9]+\.[0-9]+\.[0-9]+')
@@ -251,22 +252,42 @@ def link_state(root, release):
             raise InstallError(f'Неверная ссылка на настройки: {path}')
 
 
-def activate(root, candidate, state):
-    current_manifest = root / 'current' / 'release.json'
-    candidate_manifest = candidate / 'release.json'
-    current_crypto = json.loads(current_manifest.read_text()).get('content_encryption', 0) if current_manifest.exists() else 0
-    candidate_crypto = json.loads(candidate_manifest.read_text()).get('content_encryption', 0) if candidate_manifest.exists() else 0
-    if external_keys_enabled(root) and (not candidate_manifest.exists() or json.loads(candidate_manifest.read_text()).get('external_key_service', 0) < 1):
+def release_protocols(root, candidate, state):
+    current_path = root / 'current/release.json'
+    candidate_path = candidate / 'release.json'
+    current = json.loads(current_path.read_text()) if current_path.exists() else {}
+    selected = json.loads(candidate_path.read_text()) if candidate_path.exists() else {}
+    if external_keys_enabled(root) and selected.get('external_key_service', 0) < 1:
         raise InstallError('Этот релиз не поддерживает отдельный сервер ключей; откат отменён.')
-    minimum_crypto = max(current_crypto, state.get('content_encryption', 0))
+    minimum_crypto = max(current.get('content_encryption', 0), state.get('content_encryption', 0))
+    candidate_crypto = selected.get('content_encryption', 0)
     if minimum_crypto > candidate_crypto:
         raise InstallError('Нельзя откатить зашифрованную установку на сервер без поддержки шифрования.')
+    minimum_grants = max(current.get('device_key_grants', 0), state.get('device_key_grants', 0))
+    candidate_grants = selected.get('device_key_grants', 0)
+    if (type(candidate_grants) is not int or candidate_grants < minimum_grants
+            or (candidate_grants > 0 and selected.get('key_delivery') != 'device-grant-v1')):
+        raise InstallError('Нельзя откатить установку на релиз без защищённой выдачи ключей для устройств (device-grant-v1).')
+    return {'content_encryption': max(minimum_crypto, candidate_crypto),
+            'device_key_grants': max(minimum_grants, candidate_grants)}
+
+
+def require_device_grant_release(release):
+    manifest = json.loads((release / 'release.json').read_text())
+    grants = manifest.get('device_key_grants', 0)
+    if (manifest.get('external_key_service', 0) < 1 or type(grants) is not int or grants < 1
+            or manifest.get('key_delivery') != 'device-grant-v1'):
+        raise InstallError('Сначала обновите основной сервер до релиза с выдачей ключей для устройств (device-grant-v1).')
+
+
+def activate(root, candidate, state):
+    protocols = release_protocols(root, candidate, state)
     link_state(root, candidate)
     compose(root, candidate, state, 'config', '-q')
     compose(root, candidate, state, 'pull')
     state['pending_version'] = candidate.name
     # Persist before starting a candidate: migration can finish before activation does.
-    state['content_encryption'] = max(minimum_crypto, candidate_crypto)
+    state.update(protocols)
     save_state(root, state)
     compose(root, candidate, state, 'stop', 'api', 'worker')
     run(['bash', candidate / 'scripts/deploy-https.sh', 'up', '--host', state['domain'],
@@ -427,16 +448,7 @@ def prepare_managed_upgrade(candidate):
     if candidate.parent != root / 'releases' or not (root / 'installation.json').is_file():
         return
     state = load_state(root)
-    current_manifest = root / 'current/release.json'
-    current_crypto = json.loads(current_manifest.read_text()).get('content_encryption', 0) if current_manifest.exists() else 0
-    candidate_manifest = candidate / 'release.json'
-    candidate_crypto = json.loads(candidate_manifest.read_text()).get('content_encryption', 0)
-    if external_keys_enabled(root) and (not candidate_manifest.exists() or json.loads(candidate_manifest.read_text()).get('external_key_service', 0) < 1):
-        raise InstallError('Этот релиз не поддерживает отдельный сервер ключей; откат отменён.')
-    minimum_crypto = max(current_crypto, state.get('content_encryption', 0))
-    if minimum_crypto > candidate_crypto:
-        raise InstallError('Нельзя откатить зашифрованную установку на сервер без поддержки шифрования.')
-    state['content_encryption'] = max(minimum_crypto, candidate_crypto)
+    state.update(release_protocols(root, candidate, state))
     state['pending_version'] = candidate.name
     save_state(root, state)
     install_controller(root, candidate / 'scripts/familychat.py')
@@ -577,8 +589,7 @@ def main(argv=None):
                 if not release.exists():
                     fetch_bundle(state['repository'], version, release)
             if args.key_service_config is not None:
-                if json.loads((release / 'release.json').read_text()).get('external_key_service', 0) < 1:
-                    raise InstallError('Выбранный релиз не поддерживает отдельный сервер ключей.')
+                require_device_grant_release(release)
                 configure_key_service(root, args.key_service_config.resolve())
             activate(root, release, state)
             created = bootstrap_admin(root, release, state)
@@ -593,14 +604,15 @@ def main(argv=None):
             if not (release / 'release.json').is_file():
                 raise InstallError('Установка ещё не завершена. Повторите установочную команду.')
             if args.command == 'configure-key-server':
-                if json.loads((release / 'release.json').read_text()).get('external_key_service', 0) < 1:
-                    raise InstallError('Сначала обновите основной сервер до релиза с поддержкой сервера ключей.')
+                require_device_grant_release(release)
                 source = args.key_service_config or Path(prompt('Путь к main-server.json с сервера ключей:')).expanduser()
                 configure_key_service(root, source.resolve())
+                state.update(release_protocols(root, release, state))
+                save_state(root, state)
                 compose(root, release, state, 'config', '-q')
                 compose(root, release, state, 'up', '-d', '--no-deps', '--force-recreate', '--wait', 'api')
                 compose(root, release, state, 'exec', '-T', 'nginx', 'nginx', '-s', 'reload')
-                print('Подключён отдельный сервер ключей. API не получает приватный ключ переписки. Обновите клиентские приложения.')
+                print('Подключён отдельный сервер ключей. API регистрирует устройства и не получает приватный ключ переписки.')
                 if (root / 'secrets/content-private-key.txt').exists():
                     print('Прежние файлы ключей сохранены как резервная копия. После проверки переноса уберите их с этого хоста по инструкции.')
                 return
