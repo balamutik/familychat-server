@@ -54,4 +54,4 @@ The writable `/grants` store is separate from read-only `/state`. Pending and co
 - [x] Apple: mirrored iOS/macOS device identity, v2 key transfer, account lifecycle and retry tests; native test/build checks.
 - [x] Android: Keystore identity, core transfer protocol, cache lifecycle and replay/recovery tests; core tests and APK build.
 - [x] Deployment: writable grant mount, install/update/backup handling, protocol capability metadata, two-command upgrade/recovery and installation documentation.
-- [ ] Verify cross-service delivery and native signature interoperability, review changes, commit each repository, publish verified server artifacts.
+- [x] Verify cross-service delivery and native signature interoperability, review changes, commit each repository, publish verified server artifacts.
