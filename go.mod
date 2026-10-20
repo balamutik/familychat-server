@@ -8,6 +8,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.106.4
 	github.com/coder/websocket v1.8.14
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/rivo/uniseg v0.4.7
 	golang.org/x/crypto v0.54.0
 )
 

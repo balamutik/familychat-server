@@ -16,17 +16,18 @@ import (
 )
 
 type messageView struct {
-	Encrypted       bool          `json:"encrypted"`
-	ID              string        `json:"id"`
-	ChatID          string        `json:"chat_id"`
-	Seq             int64         `json:"seq"`
-	SenderID        string        `json:"sender_id"`
-	ClientMessageID string        `json:"client_message_id"`
-	Text            string        `json:"text"`
-	CreatedAt       string        `json:"created_at"`
-	Attachments     []fileMeta    `json:"attachments"`
-	Receipts        []receiptView `json:"receipts"`
-	Delivery        deliveryView  `json:"delivery"`
+	Encrypted       bool           `json:"encrypted"`
+	ID              string         `json:"id"`
+	ChatID          string         `json:"chat_id"`
+	Seq             int64          `json:"seq"`
+	SenderID        string         `json:"sender_id"`
+	ClientMessageID string         `json:"client_message_id"`
+	Text            string         `json:"text"`
+	CreatedAt       string         `json:"created_at"`
+	Attachments     []fileMeta     `json:"attachments"`
+	Reactions       []reactionView `json:"reactions"`
+	Receipts        []receiptView  `json:"receipts"`
+	Delivery        deliveryView   `json:"delivery"`
 }
 
 type receiptView struct {
@@ -45,6 +46,7 @@ type deliveryView struct {
 func registerMessages(mux *http.ServeMux, d Dependencies) {
 	protected := func(pattern string, fn http.HandlerFunc) { mux.Handle(pattern, require(d.Auth, fn)) }
 	registerMessageActions(mux, d)
+	registerMessageReactions(mux, d)
 	protected("POST /api/v1/chats/{id}/messages", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Encrypted       bool     `json:"encrypted"`
@@ -424,6 +426,7 @@ func attachMetadata(ctx context.Context, db *pgxpool.Pool, messages []*messageVi
 	byID := make(map[string]*messageView, len(messages))
 	for _, v := range messages {
 		v.Attachments = []fileMeta{}
+		v.Reactions = []reactionView{}
 		ids = append(ids, v.ID)
 		byID[v.ID] = v
 	}
@@ -449,6 +452,25 @@ func attachMetadata(ctx context.Context, db *pgxpool.Pool, messages []*messageVi
 		return err
 	}
 	rows.Close()
+	reactions, err := db.Query(ctx, `SELECT message_id::text,emoji,array_agg(user_id::text ORDER BY user_id) FROM message_reactions WHERE message_id=ANY($1::uuid[]) GROUP BY message_id,emoji ORDER BY message_id,emoji COLLATE "C"`, ids)
+	if err != nil {
+		return err
+	}
+	defer reactions.Close()
+	for reactions.Next() {
+		var messageID string
+		var reaction reactionView
+		if err := reactions.Scan(&messageID, &reaction.Emoji, &reaction.UserIDs); err != nil {
+			return err
+		}
+		if v := byID[messageID]; v != nil {
+			v.Reactions = append(v.Reactions, reaction)
+		}
+	}
+	if err := reactions.Err(); err != nil {
+		return err
+	}
+	reactions.Close()
 	for _, v := range messages {
 		v.Receipts = []receiptView{}
 		v.Delivery = deliveryView{Status: "sent"}

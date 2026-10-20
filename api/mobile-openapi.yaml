@@ -280,7 +280,7 @@ components:
           items: {$ref: '#/components/schemas/UUID'}
     Message:
       type: object
-      required: [id, chat_id, seq, sender_id, client_message_id, text, created_at, attachments, receipts, delivery, encrypted]
+      required: [id, chat_id, seq, sender_id, client_message_id, text, created_at, attachments, receipts, delivery, encrypted, reactions]
       properties:
         encrypted: {type: boolean, const: true}
         id: {$ref: '#/components/schemas/UUID'}
@@ -300,6 +300,26 @@ components:
           description: Подтверждения текущих участников, вступивших в чат до отправки сообщения, кроме отправителя.
           items: {$ref: '#/components/schemas/Receipt'}
         delivery: {$ref: '#/components/schemas/Delivery'}
+        reactions:
+          type: array
+          description: Реакции сгруппированы и отсортированы по UTF-8 байтам emoji; user_ids внутри группы отсортированы по UUID. Без реакций возвращается []. У каждого участника одна реакция на сообщение.
+          items: {$ref: '#/components/schemas/MessageReaction'}
+    MessageReactionInput:
+      type: object
+      additionalProperties: false
+      required: [emoji]
+      properties:
+        emoji: {type: string, minLength: 1, maxLength: 128, description: 'Один emoji grapheme, не более 128 UTF-8 байт. Допустимы составные ZWJ emoji, оттенки кожи, флаги и keycaps. Обычный текст и управляющие символы отклоняются.'}
+    MessageReaction:
+      type: object
+      required: [emoji, user_ids]
+      properties:
+        emoji: {type: string}
+        user_ids:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items: {$ref: '#/components/schemas/UUID'}
     Receipt:
       type: object
       required: [user_id, delivered, read]
@@ -375,13 +395,13 @@ components:
         id: {type: integer, format: int64, description: Глобальный курсор событий.}
         type:
           type: string
-          enum: [message, receipt, preview, file_expired, profile_updated, call_ringing, call_accepted, call_rejected, call_cancelled, call_ended, call_timeout, call_server_restart]
+          enum: [message, message_updated, receipt, preview, file_expired, profile_updated, call_ringing, call_accepted, call_rejected, call_cancelled, call_ended, call_timeout, call_server_restart]
         chat_id: {$ref: '#/components/schemas/UUID'}
         occurred_at: {type: string, format: date-time}
         data:
           type: object
           description: |
-            message = {message_id, seq}; receipt = {user_id, delivered_seq,
+            message/message_updated = {message_id, seq}; message_updated включает изменения реакций, повторно получите сообщение через HTTP. receipt = {user_id, delivered_seq,
             read_seq}; preview = {attachment_id, state}; file_expired =
             {attachment_id}; profile_updated = {user_id}; call_ringing = {call_id, caller_id,
             callee_id, kind}; call_accepted/rejected/cancelled/ended =
@@ -1099,6 +1119,49 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
+  /chats/{id}/messages/{messageID}/reaction:
+    parameters:
+      - {$ref: '#/components/parameters/ChatID'}
+      - {name: messageID, in: path, required: true, schema: {$ref: '#/components/schemas/UUID'}}
+    put:
+      tags: [Messages]
+      operationId: setMessageReaction
+      summary: Поставить или заменить свою единственную реакцию
+      description: |
+        Можно реагировать на свои и чужие сообщения. Требуются текущее членство и
+        доступное неудалённое сообщение, которое пользователь не скрывал. Блокировка
+        личного общения даёт 403 contact_blocked. Повтор той же emoji идемпотентен.
+        Изменение создаёт message_updated с message_id и seq; получите сообщение
+        через HTTP для обновления реакций. Push и новые непрочитанные не создаются,
+        seq не меняется. Реакции передаются как незашифрованные метаданные.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/MessageReactionInput'}
+      responses:
+        '200':
+          description: Полное сообщение с актуальными агрегированными реакциями.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Message'}
+        '400': {description: Некорректный JSON или invalid_reaction.}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {description: contact_blocked.}
+        '404': {$ref: '#/components/responses/NotFound'}
+    delete:
+      tags: [Messages]
+      operationId: removeMessageReaction
+      summary: Идемпотентно убрать свою реакцию
+      description: Те же правила членства и видимости, что у PUT; удаление разрешено и после блокировки личного общения. Если реакции не было, возвращается текущее сообщение. Только фактическое изменение создаёт message_updated, без push и новых непрочитанных.
+      responses:
+        '200':
+          description: Полное сообщение; reactions равно [], если реакций нет.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Message'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '404': {$ref: '#/components/responses/NotFound'}
   /chats/{id}/read:
     post:
       tags: [Messages]
