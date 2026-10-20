@@ -18,7 +18,9 @@
 
 ## Отдельный сервер ключей
 
-Сервис находится в соседней папке `keyserver/`: собственные Dockerfile, Compose,
+Начиная с **v2.3.0** основной сервер поддерживает
+[отдельный сервер ключей](https://github.com/balamutik/familychat-keyserver),
+который выпускается независимо. В рабочей копии это соседняя папка `keyserver/`: собственные Dockerfile, Compose,
 скрипты `install.sh`, `update.sh`, `renew.sh`, `backup.sh` и README. Он доступен по
 HTTPS на отдельном порту **8443** (настраивается), не соединяется с основным API
 и не использует его порт 443/8080. В установщике выбираются **Certbot** или **acme.sh**;
@@ -74,7 +76,23 @@ sudo docker compose version
 curl -fsSL https://github.com/balamutik/familychat-server/releases/latest/download/install.sh | sudo bash
 ```
 
-Установщик спрашивает домен и email для HTTPS, предлагает установить Docker,
+Тот же установщик может поставить **только сервер ключей** на отдельной машине:
+
+```sh
+curl -fsSL https://github.com/balamutik/familychat-server/releases/latest/download/install.sh | sudo bash -s -- --key-server
+```
+
+У сервера ключей также есть собственная независимая команда установки:
+
+```sh
+curl -fsSL https://github.com/balamutik/familychat-keyserver/releases/latest/download/install.sh | sudo bash
+```
+
+Мастер спросит домен, email и клиент сертификатов (Certbot/acme.sh); порт службы
+по умолчанию — 8443. Перенос существующего ключа и подключение к чату описаны в
+[инструкции](deploy/README.md#отдельный-сервер-ключей).
+
+Установщик основного чата спрашивает домен и email для HTTPS, предлагает установить Docker,
 генерирует секреты, скачивает готовые образы, создаёт первого администратора и
 включает ежедневное продление сертификата. В конце показывает адрес админки и
 первый пароль. Редактировать `.env` или Compose не нужно.

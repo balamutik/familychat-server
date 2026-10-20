@@ -10,28 +10,37 @@ UDP 3478, 55000–55039. При выпуске сертификата Let's Encr
 
 ## Отдельный сервер ключей
 
-Ниже описан режим из текущего исходного кода. Для установки готового комплекта
-нужен опубликованный релиз, содержащий `compose.keyserver.yaml` и признак
-`external_key_service: 1` в `release.json`. Установщик откажется подключать службу
-к более старому комплекту. Клиенты iOS/macOS/Android также должны поддерживать
+Поддерживается начиная с **FamilyChat v2.3.0**. Готовый комплект содержит
+`compose.keyserver.yaml` и признак `external_key_service: 1` в `release.json`.
+Установщик откажется подключать службу к более старому комплекту.
+Клиенты iOS/macOS/Android также должны поддерживать
 отдельный сервер ключей: сначала обновите приложения, затем переключайте API.
 
 ### 1. Установите службу на другом хостинге
 
-Скопируйте соседнюю папку `keyserver/` на Ubuntu/Debian с Docker Compose 2.24.4+,
-Python 3, OpenSSL и systemd. Домен `keys.example.com` должен указывать на этот хост.
-Установите выбранный клиент сертификатов согласно `keyserver/README.md`.
-Например, для Certbot и свободного порта 80:
+На отдельной Ubuntu/Debian машине подготовьте `curl` и CA-сертификаты.
+Домен `keys.example.com` должен указывать на этот хост. Запустите независимый
+установщик:
 
 ```sh
-cd /path/to/keyserver
-sudo apt-get update
-sudo apt-get install -y certbot
-sudo bash scripts/install.sh --domain keys.example.com --email owner@example.com --client certbot
+curl -fsSL https://github.com/balamutik/familychat-keyserver/releases/latest/download/install.sh | sudo bash
+```
+
+Либо используйте установщик основного проекта с выбором сервера ключей:
+
+```sh
+curl -fsSL https://github.com/balamutik/familychat-server/releases/latest/download/install.sh | sudo bash -s -- --key-server
+```
+
+Параметры можно передать сразу, например для Certbot и свободного порта 80:
+
+```sh
+curl -fsSL https://github.com/balamutik/familychat-keyserver/releases/latest/download/install.sh | sudo bash -s -- --domain keys.example.com --email owner@example.com --client certbot
 ```
 
 Для acme.sh используйте `--client acme.sh`; варианты `--challenge webroot` и
-`--challenge dns` и установка DNS-плагинов описаны в README службы. API ключей
+`--challenge dns` и установка DNS-плагинов описаны в
+[README службы](https://github.com/balamutik/familychat-keyserver#readme). API ключей
 слушает **TCP 8443**, номер меняется через `--port`. Порты 443 и 8080 не используются.
 **HTTP-01 проверка сертификата требует внешний TCP 80**, независимо от порта API.
 Если 80 занят, установщик не останавливает другое приложение: выберите существующий
@@ -45,15 +54,14 @@ URL и секрет подписи билетов, **не содержит пр�
 
 ### 2. Новая установка основного сервера
 
-После выхода релиза с этой функцией скачайте установщик в файл и передайте путь
-к конфигурации. При этом локальная приватная пара на основном сервере не создаётся:
+Передайте путь к конфигурации. При этом локальная приватная пара на основном
+сервере не создаётся:
 
 ```sh
-curl -fsSL https://github.com/balamutik/familychat-server/releases/latest/download/install.sh -o /tmp/familychat-install.sh
-sudo bash /tmp/familychat-install.sh --key-service-config /root/main-server.json
+curl -fsSL https://github.com/balamutik/familychat-server/releases/latest/download/install.sh | sudo bash -s -- --key-service-config /root/main-server.json
 ```
 
-Установка из текущего исходного кода без ожидания релиза:
+Установка из исходного кода:
 
 ```sh
 cd /path/to/FamilyChat/server

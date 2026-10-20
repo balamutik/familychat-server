@@ -3,7 +3,21 @@
 set -euo pipefail
 main() {
     if [[ "${1:-}" == --help ]]; then
-        printf 'FamilyChat installer for Ubuntu/Debian VPS. Usage: sudo bash install.sh [vX.Y.Z] [--key-service-config /root/main-server.json]\n'
+        printf 'FamilyChat installer for Ubuntu/Debian VPS.\nChat: sudo bash install.sh [vX.Y.Z] [--key-service-config /root/main-server.json]\nKey server: sudo bash install.sh --key-server [key-server options]\n'
+        return
+    fi
+    if [[ "${1:-}" == --key-server ]]; then
+        shift
+        local key_installer key_cleanup
+        key_installer="$(mktemp)"
+        printf -v key_cleanup 'rm -f -- %q' "$key_installer"
+        # shellcheck disable=SC2064
+        trap "$key_cleanup" EXIT
+        curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' \
+            --connect-timeout 20 --max-time 120 --max-filesize 1048576 \
+            'https://github.com/balamutik/familychat-keyserver/releases/latest/download/install.sh' \
+            --output "$key_installer"
+        bash "$key_installer" "$@"
         return
     fi
     local selected_version="" controller_args=()
