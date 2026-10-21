@@ -68,10 +68,10 @@ with tempfile.TemporaryDirectory() as temp:
     token.write_text('AAAAAAAAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n')
     token.chmod(0o600)
     with patch.object(installer, 'probe_push_gateway'):
-        installer.configure_push_gateway(root / 'state', release, state, 'https://push.example.com:8443', token, restart=False)
+        installer.configure_push_gateway(root / 'state', release, state, 'https://push.example.com:9443', token, restart=False)
     result = installer.compose(root / 'state', release, state, '--profile', 'tools', 'config', '--format', 'json', capture_output=True, text=True)
     gateway = json.loads(result.stdout)
-    assert gateway['services']['api']['environment']['PUSH_GATEWAY_URL'] == 'https://push.example.com:8443'
+    assert gateway['services']['api']['environment']['PUSH_GATEWAY_URL'] == 'https://push.example.com:9443'
     assert {secret['source'] for secret in gateway['services']['api']['secrets']} == {'admin_password', 'key_service'}
     worker = gateway['services']['worker']
     assert not worker.get('volumes')

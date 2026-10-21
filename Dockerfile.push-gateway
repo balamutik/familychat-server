@@ -12,5 +12,5 @@ FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* && useradd --uid 10001 --create-home familychat
 COPY --from=build /out/familychat-push-gateway /usr/local/bin/familychat-push-gateway
 USER 10001:10001
-EXPOSE 8443
+EXPOSE 9443
 ENTRYPOINT ["/usr/local/bin/familychat-push-gateway"]

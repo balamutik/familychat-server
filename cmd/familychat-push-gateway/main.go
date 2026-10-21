@@ -36,7 +36,7 @@ func run(ctx context.Context, args []string, out io.Writer) error {
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	flags.SetOutput(out)
 	path := flags.String("state", "data/state.json", "Private gateway state (directory mode 0700)")
-	listen := flags.String("listen", ":8443", "HTTPS listen address")
+	listen := flags.String("listen", ":9443", "HTTPS listen address")
 	cert := flags.String("tls-cert", "", "TLS certificate chain PEM")
 	key := flags.String("tls-key", "", "TLS private key PEM")
 	name := flags.String("name", "", "Client label for add-client")

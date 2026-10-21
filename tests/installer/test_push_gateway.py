@@ -23,7 +23,7 @@ class PushGatewayInstallerTests(unittest.TestCase):
 
     def configure(self, **kwargs):
         return installer.configure_push_gateway(self.root, self.release, self.state,
-            kwargs.get('url','https://push.example.com:8443'), self.source, restart=kwargs.get('restart',True))
+            kwargs.get('url','https://push.example.com:9443'), self.source, restart=kwargs.get('restart',True))
 
     def test_configuration_private_preserves_credentials_and_restart(self):
         before=(self.root/'.env').read_text()
@@ -31,11 +31,11 @@ class PushGatewayInstallerTests(unittest.TestCase):
             self.configure()
         env=(self.root/'.env').read_text()
         for line in before.splitlines(): self.assertIn(line+'\n',env)
-        self.assertIn('PUSH_GATEWAY_URL=https://push.example.com:8443\n',env)
+        self.assertIn('PUSH_GATEWAY_URL=https://push.example.com:9443\n',env)
         self.assertNotIn(TOKEN,env+out.getvalue())
         files=list((self.root/'secrets').glob('push-gateway-*.token'));self.assertEqual(1,len(files))
         self.assertEqual(TOKEN,files[0].read_text().strip());self.assertEqual(0o400,files[0].stat().st_mode&0o777)
-        probe.assert_called_once_with('https://push.example.com:8443',TOKEN)
+        probe.assert_called_once_with('https://push.example.com:9443',TOKEN)
         self.assertEqual(('config','-q'),compose.call_args_list[0].args[3:])
         self.assertIn('--force-recreate',compose.call_args_list[1].args)
         with patch.object(installer,'run') as run:

@@ -471,4 +471,4 @@ TURN обслуживает звонки по своим TCP/UDP-портам и
 
 ## Отдельный push-шлюз
 
-Развёртывание шлюза, выдача и отзыв токенов описаны в [инструкции push-шлюза](push-gateway/README.md). `install.sh` и `familychat configure-push` принимают `--push-gateway-url https://push.example.com:8443 --push-gateway-token-file /root/family.token`. Установщик проверяет TLS и доступ, подключает `compose.push-gateway.yaml`; только worker получает токен. Ключи APNs/FCM остаются на шлюзе.
+Развёртывание шлюза, выдача и отзыв токенов описаны в [инструкции push-шлюза](push-gateway/README.md). `install.sh` и `familychat configure-push` принимают `--push-gateway-url https://push.example.com:9443 --push-gateway-token-file /root/family.token`. Установщик проверяет TLS и доступ, подключает `compose.push-gateway.yaml`; только worker получает токен. Ключи APNs/FCM остаются на шлюзе.

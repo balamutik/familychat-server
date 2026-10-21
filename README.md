@@ -171,7 +171,7 @@ sudo familychat configure-push --push-mode direct
 Ключи Apple/Google можно хранить на отдельном [push-шлюзе](deploy/push-gateway/README.md). При первой установке укажите его HTTPS-адрес и путь к индивидуальному токену, либо настройте позже:
 
 ```bash
-sudo familychat configure-push --push-gateway-url https://push.example.com:8443 --push-gateway-token-file /root/family-one.token
+sudo familychat configure-push --push-gateway-url https://push.example.com:9443 --push-gateway-token-file /root/family-one.token
 ```
 
 Те же параметры поддерживает `install.sh`. Без аргументов `configure-push` предлагает шлюз, прямой APNs или отключение push. Нужен релиз с поддержкой шлюза; переключение пересоздаёт API и worker. Шлюз заменяет имена общими подписями FamilyChat и не получает текст переписки. Старые файлы provider-ключей сохраняются, но больше не монтируются в worker.

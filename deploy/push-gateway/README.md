@@ -23,7 +23,7 @@ sudo docker compose build gateway
 sudo docker compose up -d gateway
 ```
 
-Нужен действующий TLS-сертификат для имени шлюза от доверенного центра сертификации. DNS и входящий порт 8443 должны быть доступны серверу чатов. Выпуск и продление сертификата выполняются вашим ACME-клиентом; после продления копируйте пару в `secrets`. Сервис перечитывает TLS-файлы при новом handshake. Не заменяйте эту настройку отключением проверки сертификатов. Ключи APNs/FCM перечитываются при перезапуске шлюза.
+Нужен действующий TLS-сертификат для имени шлюза от доверенного центра сертификации. DNS и входящий порт 9443 должны быть доступны серверу чатов. Выпуск и продление сертификата выполняются вашим ACME-клиентом; после продления копируйте пару в `secrets`. Сервис перечитывает TLS-файлы при новом handshake. Не заменяйте эту настройку отключением проверки сертификатов. Ключи APNs/FCM перечитываются при перезапуске шлюза.
 
 Для шлюза только с iOS не задавайте FCM-параметры; для Android без iOS удалите четыре параметра идентификации APNs. Сервис отказывается запускаться без настроенного провайдера. Статус `/health/live` проверяет процесс, а `/v1/status` требует токен и возвращает настроенные платформы; доступность Apple/Google и корректность их credentials подтверждает только реальная отправка.
 
@@ -41,7 +41,7 @@ sudo docker compose run --rm -v "$PWD/export:/export" gateway add-client \
 
 ```bash
 sudo bash install.sh \
-  --push-gateway-url https://push.example.com:8443 \
+  --push-gateway-url https://push.example.com:9443 \
   --push-gateway-token-file /root/family-one.token
 ```
 
@@ -49,7 +49,7 @@ sudo bash install.sh \
 
 ```bash
 sudo familychat configure-push \
-  --push-gateway-url https://push.example.com:8443 \
+  --push-gateway-url https://push.example.com:9443 \
   --push-gateway-token-file /root/family-one.token
 ```
 

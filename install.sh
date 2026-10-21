@@ -3,7 +3,7 @@
 set -euo pipefail
 main() {
     if [[ "${1:-}" == --help ]]; then
-        printf 'FamilyChat installer for Ubuntu/Debian VPS.\nChat: sudo bash install.sh [vX.Y.Z] [--key-service-config /root/main-server.json]\nPush gateway: add --push-gateway-url https://push.example.com:8443 --push-gateway-token-file /root/family.token\nKey server: sudo bash install.sh --key-server [key-server options]\n'
+        printf 'FamilyChat installer for Ubuntu/Debian VPS.\nChat: sudo bash install.sh [vX.Y.Z] [--key-service-config /root/main-server.json]\nPush gateway: add --push-gateway-url https://push.example.com:9443 --push-gateway-token-file /root/family.token\nKey server: sudo bash install.sh --key-server [key-server options]\n'
         return
     fi
     if [[ "${1:-}" == --key-server ]]; then
