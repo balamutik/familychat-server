@@ -17,14 +17,14 @@ def package(version, image, output):
     if not re.fullmatch(r'ghcr\.io/[a-z0-9_.-]+/[a-z0-9_.-]+@sha256:[a-f0-9]{64}', image):
         raise ValueError('image must be an immutable GHCR digest')
     files = {name: (ROOT / name).read_bytes() for name in (
-        'compose.https.yaml', 'compose.keyserver.yaml', 'scripts/deploy-https.sh', 'scripts/familychat.py',
+        'compose.https.yaml', 'compose.keyserver.yaml', 'compose.push-gateway.yaml', 'scripts/deploy-https.sh', 'scripts/familychat.py',
         'deploy/nginx/default.conf.template')}
     compose = (ROOT / 'compose.yaml').read_text()
     if compose.count('    build: .\n') != 3:
         raise ValueError('expected API, worker and key-setup build declarations')
     files['compose.yaml'] = compose.replace('    build: .\n', f'    image: {image}\n').encode()
     files['release.json'] = (json.dumps({'version': version, 'image': image, 'content_encryption': 2, 'external_key_service': 1,
-                                       'device_key_grants': 1, 'key_delivery': 'device-grant-v1',
+                                       'device_key_grants': 1, 'key_delivery': 'device-grant-v1', 'push_gateway': 1,
                                        'repository': 'balamutik/familychat-server'}, indent=2)+'\n').encode()
     output.mkdir(parents=True, exist_ok=True)
     archive_path = output / 'familychat-server.tar.gz'

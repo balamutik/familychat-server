@@ -1,0 +1,16 @@
+FROM golang:1.27-bookworm AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+COPY cmd/familychat-push-gateway ./cmd/familychat-push-gateway
+COPY internal/config ./internal/config
+COPY internal/push ./internal/push
+COPY internal/pushgateway ./internal/pushgateway
+COPY internal/pushprotocol ./internal/pushprotocol
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/familychat-push-gateway ./cmd/familychat-push-gateway
+
+FROM debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/* && useradd --uid 10001 --create-home familychat
+COPY --from=build /out/familychat-push-gateway /usr/local/bin/familychat-push-gateway
+USER 10001:10001
+EXPOSE 8443
+ENTRYPOINT ["/usr/local/bin/familychat-push-gateway"]

@@ -246,7 +246,7 @@ sudo familychat logs                   # последние записи и по
 sudo familychat update                 # последний стабильный релиз
 sudo familychat update --version v2.2.0 # конкретный опубликованный релиз
 sudo familychat renew                  # ручное продление сертификата
-sudo familychat configure-push         # настройка APNs для фоновых уведомлений iOS
+sudo familychat configure-push         # шлюз iOS/Android, прямой APNs или отключение
 ```
 
 `familychat-renew.timer` ежедневно запускает продление HTTPS. Состояние таймера:
@@ -468,3 +468,7 @@ TURN обслуживает звонки по своим TCP/UDP-портам и
 проксирует этот протокол. Для удалённых клиентов отдельно настройте в `.env`
 `TURN_URL` и `TURN_EXTERNAL_IP`, а также доступность `3478` и UDP-диапазона
 `55000–55039`. Скрипт не меняет сетевые адреса TURN автоматически.
+
+## Отдельный push-шлюз
+
+Развёртывание шлюза, выдача и отзыв токенов описаны в [инструкции push-шлюза](push-gateway/README.md). `install.sh` и `familychat configure-push` принимают `--push-gateway-url https://push.example.com:8443 --push-gateway-token-file /root/family.token`. Установщик проверяет TLS и доступ, подключает `compose.push-gateway.yaml`; только worker получает токен. Ключи APNs/FCM остаются на шлюзе.

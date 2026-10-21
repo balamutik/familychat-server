@@ -6,3 +6,5 @@ secrets/
 *.log
 __pycache__/
 *.pyc
+deploy/push-gateway/data/
+deploy/push-gateway/export/

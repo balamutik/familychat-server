@@ -25,7 +25,7 @@ class PushSetupTests(unittest.TestCase):
 
     def configure(self, key_id='A123456789', mode='development', compose_error=None):
         with patch.object(installer, 'require_system', return_value=('ubuntu', 'noble')), \
-             patch.object(installer, 'prompt', side_effect=[str(self.key), key_id, 'Q67GTH2DSB',
+             patch.object(installer, 'prompt', side_effect=['direct', str(self.key), key_id, 'Q67GTH2DSB',
                           'com.familychat.FamilyChatSelfhosted', mode]), \
              patch.object(installer, 'compose', side_effect=compose_error) as compose, \
              patch('sys.stdout', new_callable=io.StringIO) as output:

@@ -233,7 +233,7 @@ class InstallerTests(unittest.TestCase):
             if 'psql' in args:
                 return subprocess.CompletedProcess([], 0, '0\n', '')
             return subprocess.CompletedProcess([], 0, '', '')
-        answers = iter(['chat.example.com', 'admin@example.com', 'yes'])
+        answers = iter(['chat.example.com', 'admin@example.com', '', 'yes'])
         with patch('sys.stdout', new_callable=io.StringIO), \
              patch.object(installer, 'require_system', return_value=('ubuntu','noble')), \
              patch.object(installer, 'ensure_docker'), \
@@ -270,6 +270,8 @@ class InstallerTests(unittest.TestCase):
         self.assertEqual(1, manifest['device_key_grants'])
         self.assertEqual('device-grant-v1', manifest['key_delivery'])
         self.assertEqual(2, manifest['content_encryption'])
+        self.assertEqual(1, manifest['push_gateway'])
+        self.assertTrue((self.root/'compose.push-gateway.yaml').is_file())
         self.assertEqual(installer.DEFAULT_REPOSITORY, manifest['repository'])
         compose = (self.root/'compose.yaml').read_text()
         self.assertNotIn('build:', compose)

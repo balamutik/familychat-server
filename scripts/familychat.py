@@ -177,6 +177,8 @@ def fetch_bundle(repository, version, destination):
                 raise InstallError(f'В релизе отсутствует {name}.')
         if manifest.get('external_key_service', 0) >= 1 and not (stage / 'compose.keyserver.yaml').is_file():
             raise InstallError('В релизе отсутствует compose.keyserver.yaml.')
+        if manifest.get('push_gateway', 0) >= 1 and not (stage / 'compose.push-gateway.yaml').is_file():
+            raise InstallError('В релизе отсутствует compose.push-gateway.yaml.')
         stage.rename(destination)
 
 
@@ -239,6 +241,9 @@ def compose(root, release, state, *args, **kwargs):
         if not (release / 'compose.keyserver.yaml').is_file():
             raise InstallError('Этот релиз не поддерживает отдельный сервер ключей. Обновите основной сервер.')
         files += ['-f', release / 'compose.keyserver.yaml']
+    if push_gateway_enabled(root):
+        require_push_gateway_release(release)
+        files += ['-f', release / 'compose.push-gateway.yaml']
     return run(['docker', 'compose', '--project-name', state['project'], '--env-file', root / '.env',
                 *files, *args], cwd=release, env=environment(root, state), **kwargs)
 
@@ -259,6 +264,8 @@ def release_protocols(root, candidate, state):
     selected = json.loads(candidate_path.read_text()) if candidate_path.exists() else {}
     if external_keys_enabled(root) and selected.get('external_key_service', 0) < 1:
         raise InstallError('Этот релиз не поддерживает отдельный сервер ключей; откат отменён.')
+    if push_gateway_enabled(root):
+        require_push_gateway_release(candidate)
     minimum_crypto = max(current.get('content_encryption', 0), state.get('content_encryption', 0))
     candidate_crypto = selected.get('content_encryption', 0)
     if minimum_crypto > candidate_crypto:
@@ -480,6 +487,125 @@ def bootstrap_admin(root, release, state):
     return created
 
 
+PUSH_GATEWAY_KEYS = {'PUSH_GATEWAY_URL', 'PUSH_GATEWAY_TOKEN_FILE'}
+DIRECT_PUSH_KEYS = {'APNS_KEY_FILE', 'APNS_KEY_ID', 'APNS_TEAM_ID', 'APNS_TOPIC',
+                    'FCM_CREDENTIALS_FILE', 'FCM_PROJECT_ID', 'FCM_APPLICATION_ID'}
+
+
+def push_gateway_enabled(root):
+    return any(line.startswith('PUSH_GATEWAY_URL=') and line.partition('=')[2].strip()
+               for line in (root / '.env').read_text().splitlines())
+
+
+def require_push_gateway_release(release):
+    manifest_file = release / 'release.json'
+    if manifest_file.is_file():
+        manifest = json.loads(manifest_file.read_text())
+        if type(manifest.get('push_gateway')) is not int or manifest['push_gateway'] < 1:
+            raise InstallError('Сначала обновите сервер до релиза с поддержкой push-шлюза.')
+    if not (release / 'compose.push-gateway.yaml').is_file():
+        raise InstallError('В релизе отсутствует конфигурация push-шлюза.')
+
+
+def validate_push_gateway_url(url):
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        if (len(url) > 2048 or parsed.scheme != 'https' or not parsed.hostname
+                or not re.fullmatch(r'[A-Za-z0-9.-]+', parsed.hostname)
+                or parsed.username is not None or parsed.password is not None
+                or parsed.path not in ('', '/') or parsed.query or parsed.fragment
+                or any(c in url for c in '\r\n\t $#\\?')
+                or parsed.netloc.endswith(':')
+                or (parsed.port is not None and not 1 <= parsed.port <= 65535)):
+            raise ValueError()
+    except ValueError:
+        raise InstallError('Адрес push-шлюза должен иметь вид https://push.example.com[:порт], без пути, параметров и логина.')
+    return url.rstrip('/')
+
+
+class NoPushRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise InstallError('Push-шлюз вернул перенаправление. Укажите его конечный HTTPS-адрес.')
+
+
+def probe_push_gateway(url, token):
+    request = urllib.request.Request(url + '/v1/status', headers={'Authorization': 'Bearer ' + token})
+    try:
+        opener = urllib.request.build_opener(NoPushRedirect())
+        with opener.open(request, timeout=10) as response:
+            raw = response.read(4097)
+            if response.status != 200 or len(raw) > 4096:
+                raise ValueError()
+        result = json.loads(raw)
+        if (not isinstance(result, dict) or type(result.get('protocol')) is not int
+                or result['protocol'] != 1 or type(result.get('apns')) is not bool
+                or type(result.get('fcm')) is not bool or not (result['apns'] or result['fcm'])):
+            raise ValueError()
+    except (urllib.error.URLError, OSError, ValueError):
+        raise InstallError('Проверка push-шлюза не прошла. Проверьте HTTPS-сертификат, адрес, токен и настройку APNs/FCM на шлюзе.') from None
+
+
+def restart_push(root, release, state):
+    compose(root, release, state, 'up', '-d', '--no-deps', '--force-recreate', '--wait', 'api', 'worker')
+    compose(root, release, state, 'exec', '-T', 'nginx', 'nginx', '-s', 'reload')
+
+
+def configure_push_gateway(root, release, state, url, token_source, *, restart=True):
+    require_push_gateway_release(release)
+    url = validate_push_gateway_url(url)
+    try:
+        if not token_source.is_file() or token_source.stat().st_size > 256 or token_source.stat().st_mode & 0o077:
+            raise ValueError()
+        token = token_source.read_text().strip()
+        if not re.fullmatch(r'[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}', token):
+            raise ValueError()
+        parts = token.split('.')
+        if any(base64.urlsafe_b64encode(base64.urlsafe_b64decode(part + '=' * (-len(part) % 4))).decode().rstrip('=') != part for part in parts):
+            raise ValueError()
+    except (OSError, ValueError, UnicodeError):
+        raise InstallError('Нужен файл токена, выданный push-шлюзом, с правами 0400 или 0600.') from None
+    probe_push_gateway(url, token)
+    root.chmod(0o700)
+    secret_dir = root / 'secrets'; secret_dir.mkdir(exist_ok=True, mode=0o700); secret_dir.chmod(0o700)
+    token_name = 'push-gateway-' + hashlib.sha256(token.encode()).hexdigest()[:16] + '.token'
+    target = secret_dir / token_name
+    existed = target.exists()
+    previous = (root / '.env').read_text()
+    atomic_write(target, token + '\n', 0o400)
+    if os.geteuid() == 0:
+        os.chown(target, 10001, 10001)
+    values = {'PUSH_GATEWAY_URL': url, 'PUSH_GATEWAY_TOKEN_FILE': './secrets/' + token_name}
+    lines = [line for line in previous.splitlines() if line.partition('=')[0] not in PUSH_GATEWAY_KEYS | DIRECT_PUSH_KEYS]
+    try:
+        atomic_write(root / '.env', '\n'.join(lines) + '\n' + ''.join(f'{k}={v}\n' for k,v in values.items()))
+        link_state(root, release)
+        compose(root, release, state, 'config', '-q')
+    except Exception:
+        atomic_write(root / '.env', previous)
+        if not existed:
+            target.unlink(missing_ok=True)
+        raise
+    # Keep the selected configuration after runtime failures, so rerun/update can recover.
+    if restart:
+        restart_push(root, release, state)
+    print('Push-шлюз настроен. Ключи APNs/FCM на сервере чатов не используются.')
+    if any(line.partition('=')[0] in DIRECT_PUSH_KEYS for line in previous.splitlines()):
+        print('Прежние файлы APNs/FCM сохранены. После проверки перенесите их с этого сервера в защищённое хранилище.')
+
+
+def disable_push(root, release, state):
+    previous = (root / '.env').read_text()
+    lines = [line for line in previous.splitlines() if line.partition('=')[0] not in PUSH_GATEWAY_KEYS | DIRECT_PUSH_KEYS]
+    atomic_write(root / '.env', '\n'.join(lines) + '\n')
+    try:
+        compose(root, release, state, 'config', '-q')
+    except Exception:
+        atomic_write(root / '.env', previous)
+        raise
+    restart_push(root, release, state)
+    print('Фоновые push-уведомления отключены. Файлы ключей и токенов сохранены.')
+
+
 def configure_push(root, release, state):
     print('Настройка уведомлений и системных звонков iOS. API и worker будут перезапущены.')
     key_path = Path(prompt('Путь к APNs-ключу Apple (.p8):')).expanduser()
@@ -514,7 +640,7 @@ def configure_push(root, release, state):
               'APNS_SANDBOX': 'true' if mode == 'development' else 'false'}
     env_file = root / '.env'
     previous = env_file.read_text()
-    lines = [line for line in previous.splitlines() if line.partition('=')[0] not in values]
+    lines = [line for line in previous.splitlines() if line.partition('=')[0] not in set(values) | PUSH_GATEWAY_KEYS]
     configured = '\n'.join(lines) + '\n' + ''.join(f'{key}={value}\n' for key, value in values.items())
     atomic_write(env_file, configured)
     try:
@@ -535,9 +661,18 @@ def main(argv=None):
     parser.add_argument('command', choices=('install', 'update', 'status', 'logs', 'renew', 'configure-push', 'configure-key-server'))
     parser.add_argument('--version', help='Конкретный релиз vX.Y.Z (по умолчанию последний)')
     parser.add_argument('--key-service-config', type=Path, help='main-server.json, экспортированный отдельным сервером ключей')
+    parser.add_argument('--push-gateway-url', help='HTTPS-адрес push-шлюза')
+    parser.add_argument('--push-gateway-token-file', type=Path, help='Файл индивидуального токена push-шлюза (0400/0600)')
+    parser.add_argument('--push-mode', choices=('gateway', 'direct', 'off'), help='Режим команды configure-push')
     args = parser.parse_args(argv)
     if args.key_service_config is not None and args.command not in ('install', 'update', 'configure-key-server'):
         parser.error('--key-service-config используется только с install, update или configure-key-server')
+    if bool(args.push_gateway_url) != bool(args.push_gateway_token_file):
+        parser.error('--push-gateway-url и --push-gateway-token-file задаются вместе')
+    if args.push_gateway_url and args.command not in ('install', 'update', 'configure-push'):
+        parser.error('Параметры push-шлюза используются с install, update или configure-push')
+    if args.push_mode and (args.command != 'configure-push' or (args.push_gateway_url and args.push_mode != 'gateway')):
+        parser.error('--push-mode используется с configure-push; адрес шлюза совместим только с gateway')
     distro, codename = require_system()
     root = args.root.resolve()
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -547,6 +682,7 @@ def main(argv=None):
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise InstallError('Другая команда FamilyChat уже выполняется.')
+        fresh_install = False
         if args.command == 'install':
             ensure_docker(distro, codename)
             if (root / 'installation.json').exists():
@@ -563,6 +699,7 @@ def main(argv=None):
                 validate_input(domain, email, public_ip)
                 check_network(domain, public_ip, fresh=True)
                 state = configure(root, domain, email, public_ip)
+                fresh_install = True
         else:
             if not (root / 'installation.json').exists():
                 raise InstallError('Сначала выполните установку.')
@@ -591,6 +728,14 @@ def main(argv=None):
             if args.key_service_config is not None:
                 require_device_grant_release(release)
                 configure_key_service(root, args.key_service_config.resolve())
+            gateway_url = args.push_gateway_url
+            gateway_token = args.push_gateway_token_file
+            if fresh_install and not gateway_url:
+                gateway_url = prompt('HTTPS-адрес push-шлюза (Enter — настроить позже):')
+                if gateway_url:
+                    gateway_token = Path(prompt('Путь к файлу токена push-шлюза:')).expanduser()
+            if gateway_url:
+                configure_push_gateway(root, release, state, gateway_url, gateway_token.resolve(), restart=False)
             activate(root, release, state)
             created = bootstrap_admin(root, release, state)
             install_commands(root)
@@ -622,7 +767,19 @@ def main(argv=None):
                 print('Версия: ' + json.loads((release / 'release.json').read_text())['version'])
                 compose(root, release, state, 'ps')
             elif args.command == 'configure-push':
-                configure_push(root, release, state)
+                mode = 'gateway' if args.push_gateway_url else args.push_mode
+                if mode is None:
+                    mode = prompt('Push: gateway — отдельный шлюз, direct — APNs на этом сервере, off — отключить [gateway]:').lower() or 'gateway'
+                if mode == 'gateway':
+                    url = args.push_gateway_url or prompt('HTTPS-адрес push-шлюза:')
+                    token_file = args.push_gateway_token_file or Path(prompt('Путь к файлу токена push-шлюза:')).expanduser()
+                    configure_push_gateway(root, release, state, url, token_file.resolve())
+                elif mode == 'direct':
+                    configure_push(root, release, state)
+                elif mode == 'off':
+                    disable_push(root, release, state)
+                else:
+                    raise InstallError('Выберите gateway, direct или off.')
             elif args.command == 'logs':
                 compose(root, release, state, 'logs', '--tail', '100', '-f', 'api', 'worker', 'nginx')
             else:

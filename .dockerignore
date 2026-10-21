@@ -5,3 +5,7 @@ admin/dist
 *.md
 .env
 secrets
+deploy/push-gateway/.env
+deploy/push-gateway/data
+deploy/push-gateway/export
+deploy/push-gateway/secrets

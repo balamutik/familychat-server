@@ -3,7 +3,7 @@
 set -euo pipefail
 main() {
     if [[ "${1:-}" == --help ]]; then
-        printf 'FamilyChat installer for Ubuntu/Debian VPS.\nChat: sudo bash install.sh [vX.Y.Z] [--key-service-config /root/main-server.json]\nKey server: sudo bash install.sh --key-server [key-server options]\n'
+        printf 'FamilyChat installer for Ubuntu/Debian VPS.\nChat: sudo bash install.sh [vX.Y.Z] [--key-service-config /root/main-server.json]\nPush gateway: add --push-gateway-url https://push.example.com:8443 --push-gateway-token-file /root/family.token\nKey server: sudo bash install.sh --key-server [key-server options]\n'
         return
     fi
     if [[ "${1:-}" == --key-server ]]; then
@@ -23,9 +23,9 @@ main() {
     local selected_version="" controller_args=()
     while (( $# )); do
         case "$1" in
-            --key-service-config)
-                [[ $# -ge 2 ]] || { echo '--key-service-config requires a path' >&2; return 1; }
-                controller_args+=(--key-service-config "$2"); shift 2 ;;
+            --key-service-config|--push-gateway-url|--push-gateway-token-file)
+                [[ $# -ge 2 ]] || { echo "$1 requires a value" >&2; return 1; }
+                controller_args+=("$1" "$2"); shift 2 ;;
             v[0-9]*)
                 [[ -z "$selected_version" ]] || { echo 'Specify only one version' >&2; return 1; }
                 selected_version="$1"; shift ;;

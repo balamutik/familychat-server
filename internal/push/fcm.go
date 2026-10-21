@@ -191,11 +191,22 @@ func (c *FCM) Send(ctx context.Context, token, kind string, payload json.RawMess
 }
 
 type Router struct {
-	APNs *Client
-	FCM  *FCM
+	Gateway *Gateway
+	APNs    *Client
+	FCM     *FCM
 }
 
 func NewRouter(c config.Config) (*Router, error) {
+	if err := c.ValidatePush(); err != nil {
+		return nil, err
+	}
+	if c.PushGatewayURL != "" {
+		gateway, err := NewGateway(c)
+		if err != nil {
+			return nil, err
+		}
+		return &Router{Gateway: gateway}, nil
+	}
 	apns, err := New(c)
 	if err != nil {
 		return nil, err
@@ -212,6 +223,9 @@ func NewRouter(c config.Config) (*Router, error) {
 func (r *Router) Send(ctx context.Context, token, kind string, payload json.RawMessage) (bool, error) {
 	if r == nil {
 		return false, errors.New("push is not configured")
+	}
+	if r.Gateway != nil {
+		return r.Gateway.Send(ctx, token, kind, payload)
 	}
 	if strings.HasPrefix(kind, "fcm_") {
 		return r.FCM.Send(ctx, token, kind, payload)

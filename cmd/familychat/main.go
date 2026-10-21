@@ -151,7 +151,7 @@ func run(ctx context.Context, args []string) error {
 			}
 		}
 	}()
-	h := httpapi.New(httpapi.Dependencies{KeyService: keyService, ContentKey: contentKey, DB: pool, Objects: store, Auth: service, Events: hub, AllowedOrigins: c.AllowedOrigins, TurnURL: c.TurnURL, TurnSecret: c.TurnSecret, PushEnabled: c.APNsKeyFile != "" || c.FCMCredentialsFile != "", MaxFileBytes: c.MaxFileBytes, UserQuotaBytes: c.UserQuotaBytes, AdminStaticDir: os.Getenv("ADMIN_STATIC_DIR")})
+	h := httpapi.New(httpapi.Dependencies{KeyService: keyService, ContentKey: contentKey, DB: pool, Objects: store, Auth: service, Events: hub, AllowedOrigins: c.AllowedOrigins, TurnURL: c.TurnURL, TurnSecret: c.TurnSecret, PushEnabled: c.PushEnabled(), MaxFileBytes: c.MaxFileBytes, UserQuotaBytes: c.UserQuotaBytes, AdminStaticDir: os.Getenv("ADMIN_STATIC_DIR")})
 	srv := &http.Server{Addr: c.ListenAddr, Handler: h, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	signalCtx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()

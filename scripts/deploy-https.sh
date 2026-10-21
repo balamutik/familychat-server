@@ -35,6 +35,10 @@ compose() {
         [[ -f compose.keyserver.yaml ]] || fail "release does not support the external key server"
         files+=(-f compose.keyserver.yaml)
     fi
+    if [[ -n "${PUSH_GATEWAY_URL:-}" ]] || { [[ -f .env ]] && grep -Eq '^PUSH_GATEWAY_URL=.+$' .env; }; then
+        [[ -f compose.push-gateway.yaml ]] || fail "release does not support the push gateway"
+        files+=(-f compose.push-gateway.yaml)
+    fi
     docker compose "${files[@]}" "$@"
 }
 certbot_run() {

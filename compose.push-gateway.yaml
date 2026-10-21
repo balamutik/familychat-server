@@ -1,0 +1,25 @@
+# Chat-server override: only the worker can read its scoped gateway credential.
+services:
+  api:
+    environment: &gateway_environment
+      PUSH_GATEWAY_URL: ${PUSH_GATEWAY_URL:?set PUSH_GATEWAY_URL}
+      PUSH_GATEWAY_TOKEN_FILE: /run/secrets/push_gateway_token
+      APNS_KEY_FILE: ""
+      APNS_KEY_ID: ""
+      APNS_TEAM_ID: ""
+      APNS_TOPIC: ""
+      FCM_CREDENTIALS_FILE: ""
+      FCM_PROJECT_ID: ""
+      FCM_APPLICATION_ID: ""
+  worker:
+    environment: *gateway_environment
+    volumes: !override []
+    secrets:
+      - source: push_gateway_token
+        target: push_gateway_token
+        uid: '10001'
+        gid: '10001'
+        mode: 0400
+secrets:
+  push_gateway_token:
+    file: ${PUSH_GATEWAY_TOKEN_FILE:?set PUSH_GATEWAY_TOKEN_FILE}
