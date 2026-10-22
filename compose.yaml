@@ -113,7 +113,10 @@ services:
       - --use-auth-secret
       - --static-auth-secret=${TURN_SECRET:?set TURN_SECRET}
       - --realm=familychat.local
-      - --external-ip=${TURN_EXTERNAL_IP:-127.0.0.1}
+      # Coturn must map its public address back to this container and allow its
+      # own relay address, while keeping other private-network peers blocked.
+      # The official entrypoint expands hostname at each container start.
+      - --external-ip=${TURN_EXTERNAL_IP:-127.0.0.1}/$$(hostname -i)
       - --listening-port=3478
       - --min-port=55000
       - --max-port=55039

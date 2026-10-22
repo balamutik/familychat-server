@@ -22,6 +22,12 @@ with tempfile.TemporaryDirectory() as temp:
     installer.link_state(root / 'state', release)
     result = installer.compose(root / 'state', release, state, '--profile', 'tools', 'config', '--format', 'json', capture_output=True, text=True)
     config = json.loads(result.stdout)
+    turn = config['services']['turn']
+    # Keep runtime discovery intact through Compose interpolation: Docker may
+    # assign another private address when the TURN container is recreated.
+    assert '--external-ip=8.8.8.8/$$(hostname -i)' in turn['command']
+    assert '--denied-peer-ip=172.16.0.0-172.31.255.255' in turn['command']
+    assert '--denied-peer-ip=192.168.0.0-192.168.255.255' in turn['command']
     assert config['name'] == 'familychat'
     assert config['services']['api']['image'] == config['services']['worker']['image']
     assert '@sha256:' in config['services']['api']['image']
