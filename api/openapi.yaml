@@ -110,6 +110,7 @@ components:
           type: array
           maxItems: 10
           items: {$ref: '#/components/schemas/UUID'}
+        reply_to_message_id: {$ref: '#/components/schemas/UUID', description: Optional ID of a visible message in the same chat.}
     MessageReactionInput:
       type: object
       additionalProperties: false
@@ -135,6 +136,7 @@ components:
         seq: {type: integer, format: int64, minimum: 1}
         sender_id: {$ref: '#/components/schemas/UUID'}
         client_message_id: {$ref: '#/components/schemas/UUID'}
+        reply_to_message_id: {$ref: '#/components/schemas/UUID'}
         text: {type: string, description: FCENC001 encrypted text when encrypted is true.}
         encrypted: {type: boolean}
         created_at: {type: string}

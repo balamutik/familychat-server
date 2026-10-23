@@ -64,6 +64,72 @@ func TestMessageIdempotencyHistorySearchAndRead(t *testing.T) {
 	_ = a
 }
 
+func TestReplyReferencesRemainInHistoryAndRejectForeignMessages(t *testing.T) {
+	pool := testDatabase(t)
+	a, at := seedSession(t, pool, "user")
+	b, bt := seedSession(t, pool, "user")
+	c, _ := seedSession(t, pool, "user")
+	h := New(Dependencies{DB: pool, Auth: &auth.Service{DB: pool, TTL: time.Hour}})
+	chat := func(peer string) string {
+		r := callAPI(h, "POST", "/api/v1/chats/direct", fmt.Sprintf(`{"user_id":%q}`, peer), at)
+		if r.Code != 201 {
+			t.Fatalf("create chat: %d %s", r.Code, r.Body.String())
+		}
+		var result struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(r.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result.ID
+	}
+	chatID, otherChatID := chat(b), chat(c)
+	url := "/api/v1/chats/" + chatID + "/messages"
+	original := callAPI(h, "POST", url, `{"client_message_id":"00000000-0000-4000-8000-000000000101","text":"original"}`, at)
+	if original.Code != 201 {
+		t.Fatalf("original: %d %s", original.Code, original.Body.String())
+	}
+	var first messageView
+	if err := json.Unmarshal(original.Body.Bytes(), &first); err != nil {
+		t.Fatal(err)
+	}
+	replyBody := fmt.Sprintf(`{"client_message_id":"00000000-0000-4000-8000-000000000102","text":"reply","reply_to_message_id":%q}`, first.ID)
+	reply := callAPI(h, "POST", url, replyBody, bt)
+	if reply.Code != 201 {
+		t.Fatalf("reply: %d %s", reply.Code, reply.Body.String())
+	}
+	var sent messageView
+	if err := json.Unmarshal(reply.Body.Bytes(), &sent); err != nil {
+		t.Fatal(err)
+	}
+	if sent.ReplyToMessageID == nil || *sent.ReplyToMessageID != first.ID {
+		t.Fatalf("reply reference missing: %+v", sent)
+	}
+	for _, path := range []string{url, url + "/" + sent.ID, "/api/v1/chats/" + chatID + "/search?q=reply"} {
+		r := callAPI(h, "GET", path, "", at)
+		if r.Code != 200 || !containsText(r.Body.String(), `"reply_to_message_id":"`+first.ID+`"`) {
+			t.Fatalf("reply reference missing from %s: %d %s", path, r.Code, r.Body.String())
+		}
+	}
+	if r := callAPI(h, "POST", url, replyBody, bt); r.Code != 200 {
+		t.Fatalf("idempotent retry: %d", r.Code)
+	}
+	changed := fmt.Sprintf(`{"client_message_id":"00000000-0000-4000-8000-000000000102","text":"reply","reply_to_message_id":null}`)
+	if r := callAPI(h, "POST", url, changed, bt); r.Code != 409 {
+		t.Fatalf("changed reply target: %d", r.Code)
+	}
+	foreign := callAPI(h, "POST", "/api/v1/chats/"+otherChatID+"/messages", `{"client_message_id":"00000000-0000-4000-8000-000000000103","text":"foreign"}`, at)
+	var other messageView
+	if err := json.Unmarshal(foreign.Body.Bytes(), &other); err != nil {
+		t.Fatal(err)
+	}
+	bad := fmt.Sprintf(`{"client_message_id":"00000000-0000-4000-8000-000000000104","text":"bad","reply_to_message_id":%q}`, other.ID)
+	if r := callAPI(h, "POST", url, bad, bt); r.Code != 404 {
+		t.Fatalf("cross-chat reply: %d", r.Code)
+	}
+	_ = a
+}
+
 func containsText(s, substring string) bool {
 	return len(s) >= len(substring) && (stringContains(s, substring))
 }

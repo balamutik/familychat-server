@@ -278,6 +278,7 @@ components:
           maxItems: 10
           uniqueItems: true
           items: {$ref: '#/components/schemas/UUID'}
+        reply_to_message_id: {$ref: '#/components/schemas/UUID', description: Необязательный ID видимого сообщения в том же чате.}
     Message:
       type: object
       required: [id, chat_id, seq, sender_id, client_message_id, text, created_at, attachments, receipts, delivery, encrypted, reactions]
@@ -288,6 +289,7 @@ components:
         seq: {type: integer, format: int64, minimum: 1, description: Порядковый номер внутри чата.}
         sender_id: {$ref: '#/components/schemas/UUID'}
         client_message_id: {$ref: '#/components/schemas/UUID'}
+        reply_to_message_id: {$ref: '#/components/schemas/UUID'}
         text: {type: string, description: Base64 FCENC001 encrypted text.}
         created_at:
           type: string
