@@ -279,11 +279,13 @@ components:
           uniqueItems: true
           items: {$ref: '#/components/schemas/UUID'}
         reply_to_message_id: {$ref: '#/components/schemas/UUID', description: Необязательный ID видимого сообщения в том же чате.}
+        forwarded: {type: boolean, default: false, description: Сообщение переслано; источник не раскрывается.}
     Message:
       type: object
-      required: [id, chat_id, seq, sender_id, client_message_id, text, created_at, attachments, receipts, delivery, encrypted, reactions]
+      required: [id, chat_id, seq, sender_id, client_message_id, text, created_at, attachments, receipts, delivery, encrypted, forwarded, reactions]
       properties:
         encrypted: {type: boolean, const: true}
+        forwarded: {type: boolean}
         id: {$ref: '#/components/schemas/UUID'}
         chat_id: {$ref: '#/components/schemas/UUID'}
         seq: {type: integer, format: int64, minimum: 1, description: Порядковый номер внутри чата.}

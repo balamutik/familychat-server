@@ -111,6 +111,7 @@ components:
           maxItems: 10
           items: {$ref: '#/components/schemas/UUID'}
         reply_to_message_id: {$ref: '#/components/schemas/UUID', description: Optional ID of a visible message in the same chat.}
+        forwarded: {type: boolean, default: false, description: Whether the message was forwarded; no source identity is exposed.}
     MessageReactionInput:
       type: object
       additionalProperties: false
@@ -129,7 +130,7 @@ components:
           items: {$ref: '#/components/schemas/UUID'}
     Message:
       type: object
-      required: [id, chat_id, seq, sender_id, client_message_id, text, encrypted, created_at, attachments, receipts, delivery, reactions]
+      required: [id, chat_id, seq, sender_id, client_message_id, text, encrypted, forwarded, created_at, attachments, receipts, delivery, reactions]
       properties:
         id: {$ref: '#/components/schemas/UUID'}
         chat_id: {$ref: '#/components/schemas/UUID'}
@@ -139,6 +140,7 @@ components:
         reply_to_message_id: {$ref: '#/components/schemas/UUID'}
         text: {type: string, description: FCENC001 encrypted text when encrypted is true.}
         encrypted: {type: boolean}
+        forwarded: {type: boolean}
         created_at: {type: string}
         attachments: {type: array, items: {type: object}}
         receipts: {type: array, items: {type: object}}

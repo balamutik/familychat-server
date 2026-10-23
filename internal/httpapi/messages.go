@@ -17,6 +17,7 @@ import (
 
 type messageView struct {
 	Encrypted        bool           `json:"encrypted"`
+	Forwarded        bool           `json:"forwarded"`
 	ID               string         `json:"id"`
 	ChatID           string         `json:"chat_id"`
 	Seq              int64          `json:"seq"`
@@ -51,6 +52,7 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 	protected("POST /api/v1/chats/{id}/messages", func(w http.ResponseWriter, r *http.Request) {
 		var body struct {
 			Encrypted        bool     `json:"encrypted"`
+			Forwarded        bool     `json:"forwarded"`
 			ClientMessageID  string   `json:"client_message_id"`
 			ReplyToMessageID *string  `json:"reply_to_message_id"`
 			Text             string   `json:"text"`
@@ -93,7 +95,7 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 		var v messageView
 		var existingText string
 		var deleted bool
-		err = tx.QueryRow(r.Context(), `SELECT id::text,chat_id::text,seq,sender_id::text,client_message_id::text,body,encrypted,created_at::text,reply_to_message_id::text,(deleted_at IS NOT NULL OR EXISTS(SELECT 1 FROM message_hidden mh WHERE mh.message_id=messages.id AND mh.user_id=$2)) FROM messages WHERE chat_id=$1 AND sender_id=$2 AND client_message_id=$3`, chatID, p.UserID, body.ClientMessageID).Scan(&v.ID, &v.ChatID, &v.Seq, &v.SenderID, &v.ClientMessageID, &existingText, &v.Encrypted, &v.CreatedAt, &v.ReplyToMessageID, &deleted)
+		err = tx.QueryRow(r.Context(), `SELECT id::text,chat_id::text,seq,sender_id::text,client_message_id::text,body,encrypted,forwarded,created_at::text,reply_to_message_id::text,(deleted_at IS NOT NULL OR EXISTS(SELECT 1 FROM message_hidden mh WHERE mh.message_id=messages.id AND mh.user_id=$2)) FROM messages WHERE chat_id=$1 AND sender_id=$2 AND client_message_id=$3`, chatID, p.UserID, body.ClientMessageID).Scan(&v.ID, &v.ChatID, &v.Seq, &v.SenderID, &v.ClientMessageID, &existingText, &v.Encrypted, &v.Forwarded, &v.CreatedAt, &v.ReplyToMessageID, &deleted)
 		if err == nil {
 			if deleted {
 				writeError(w, 409, "message_deleted")
@@ -135,7 +137,7 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 			if !replyChanged && v.ReplyToMessageID != nil {
 				replyChanged = !strings.EqualFold(*v.ReplyToMessageID, *body.ReplyToMessageID)
 			}
-			if v.Encrypted != body.Encrypted || (!body.Encrypted && existingText != body.Text) || !sameIDs || replyChanged {
+			if v.Encrypted != body.Encrypted || v.Forwarded != body.Forwarded || (!body.Encrypted && existingText != body.Text) || !sameIDs || replyChanged {
 				writeError(w, 409, "message_id_conflict")
 				return
 			}
@@ -187,7 +189,7 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 			writeError(w, 500, "internal")
 			return
 		}
-		err = tx.QueryRow(r.Context(), `INSERT INTO messages(chat_id,seq,sender_id,client_message_id,body,encrypted,reply_to_message_id) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING id::text,created_at::text`, chatID, seq, p.UserID, body.ClientMessageID, body.Text, body.Encrypted, body.ReplyToMessageID).Scan(&v.ID, &v.CreatedAt)
+		err = tx.QueryRow(r.Context(), `INSERT INTO messages(chat_id,seq,sender_id,client_message_id,body,encrypted,reply_to_message_id,forwarded) VALUES($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id::text,created_at::text`, chatID, seq, p.UserID, body.ClientMessageID, body.Text, body.Encrypted, body.ReplyToMessageID, body.Forwarded).Scan(&v.ID, &v.CreatedAt)
 		if err != nil {
 			writeError(w, 500, "internal")
 			return
@@ -230,6 +232,7 @@ func registerMessages(mux *http.ServeMux, d Dependencies) {
 		v.ClientMessageID = body.ClientMessageID
 		v.Text = body.Text
 		v.Encrypted = body.Encrypted
+		v.Forwarded = body.Forwarded
 		v.ReplyToMessageID = body.ReplyToMessageID
 		if err := attachMetadata(r.Context(), d.DB, []*messageView{&v}); err != nil {
 			writeError(w, 500, "internal")
@@ -452,19 +455,21 @@ func attachMetadata(ctx context.Context, db *pgxpool.Pool, messages []*messageVi
 		ids = append(ids, v.ID)
 		byID[v.ID] = v
 	}
-	replies, err := db.Query(ctx, `SELECT id::text,reply_to_message_id::text FROM messages WHERE id=ANY($1::uuid[])`, ids)
+	replies, err := db.Query(ctx, `SELECT id::text,reply_to_message_id::text,forwarded FROM messages WHERE id=ANY($1::uuid[])`, ids)
 	if err != nil {
 		return err
 	}
 	for replies.Next() {
 		var id string
 		var replyID *string
-		if err := replies.Scan(&id, &replyID); err != nil {
+		var forwarded bool
+		if err := replies.Scan(&id, &replyID, &forwarded); err != nil {
 			replies.Close()
 			return err
 		}
 		if v := byID[id]; v != nil {
 			v.ReplyToMessageID = replyID
+			v.Forwarded = forwarded
 		}
 	}
 	if err := replies.Err(); err != nil {

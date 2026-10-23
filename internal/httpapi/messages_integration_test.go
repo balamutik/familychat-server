@@ -130,6 +130,47 @@ func TestReplyReferencesRemainInHistoryAndRejectForeignMessages(t *testing.T) {
 	_ = a
 }
 
+func TestForwardedFlagSurvivesHistorySearchAndRetry(t *testing.T) {
+	pool := testDatabase(t)
+	_, senderToken := seedSession(t, pool, "user")
+	recipientID, recipientToken := seedSession(t, pool, "user")
+	h := New(Dependencies{DB: pool, Auth: &auth.Service{DB: pool, TTL: time.Hour}})
+	created := callAPI(h, "POST", "/api/v1/chats/direct", fmt.Sprintf(`{"user_id":%q}`, recipientID), senderToken)
+	if created.Code != 201 {
+		t.Fatalf("chat: %d %s", created.Code, created.Body.String())
+	}
+	var chat struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(created.Body.Bytes(), &chat); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/v1/chats/" + chat.ID + "/messages"
+	body := `{"client_message_id":"00000000-0000-4000-8000-000000000201","text":"forwarded text","forwarded":true}`
+	sent := callAPI(h, "POST", path, body, senderToken)
+	if sent.Code != 201 || !containsText(sent.Body.String(), `"forwarded":true`) {
+		t.Fatalf("send: %d %s", sent.Code, sent.Body.String())
+	}
+	for _, request := range []struct{ method, path, token string }{
+		{"POST", path, senderToken},
+		{"GET", path, recipientToken},
+		{"GET", "/api/v1/chats/" + chat.ID + "/search?q=forwarded", recipientToken},
+	} {
+		payload := ""
+		if request.method == "POST" {
+			payload = body
+		}
+		response := callAPI(h, request.method, request.path, payload, request.token)
+		if response.Code != 200 || !containsText(response.Body.String(), `"forwarded":true`) {
+			t.Fatalf("%s %s: %d %s", request.method, request.path, response.Code, response.Body.String())
+		}
+	}
+	changed := `{"client_message_id":"00000000-0000-4000-8000-000000000201","text":"forwarded text","forwarded":false}`
+	if response := callAPI(h, "POST", path, changed, senderToken); response.Code != 409 {
+		t.Fatalf("changed forwarded flag: %d %s", response.Code, response.Body.String())
+	}
+}
+
 func containsText(s, substring string) bool {
 	return len(s) >= len(substring) && (stringContains(s, substring))
 }
